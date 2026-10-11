@@ -9,7 +9,7 @@ Includes bundled-asset PC installers for GTA: Vice City and GTA: San Andreas,
 plus experimental GTA: Vice City Stories PS2/PSP and GTA: Liberty City Stories PSP
 ISO patchers. Classic GTA: Vice City PS2 remains a blank, disabled Coming Soon tab.
 PC mod files are loaded from Assets/<game> and installed with backups and rollback.
-ISO patchers create new images and support ordinary 2048-byte-sector ISO9660 images only.
+ISO/CSO patchers create new images, supporting ISO9660 images and standard block-compressed CSO files.
 """
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ import struct
 import sys
 import threading
 import traceback
+import tempfile
+import zlib
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,7 +96,81 @@ def read_both32(data: bytes, what: str) -> int:
 
 
 def write_both32(value: int) -> bytes:
+    if not 0 <= value <= 0xFFFFFFFF:
+        raise ValueError("The ISO9660 value exceeds the supported 32-bit field size.")
     return struct.pack("<I", value) + struct.pack(">I", value)
+
+
+def _write_iso_replacement(out, target: "Record", payload_path: Path, next_free_sector: int) -> tuple[int, bool]:
+    """Write a replacement file, relocating it to the end of the ISO if needed.
+
+    ISO9660 files do not have a general-purpose allocator. If the replacement is
+    larger than the target's current extent, its data is appended on sector
+    boundaries and the directory record's extent and size are updated.
+    """
+    payload_size = payload_path.stat().st_size
+    if payload_size <= 0:
+        raise ValueError(f"Replacement file is empty: {payload_path.name}")
+    if payload_size > 0xFFFFFFFF:
+        raise ValueError(f"Replacement file is too large for an ISO9660 directory record: {payload_path.name}")
+
+    relocated = payload_size > target.sectors * SECTOR_SIZE
+    if relocated:
+        new_extent = next_free_sector
+        # Preserve any extended-attribute sectors before the file's data extent.
+        ext_attr_bytes = target.ext_attr_length * SECTOR_SIZE
+        if ext_attr_bytes:
+            out.seek(target.extent * SECTOR_SIZE)
+            attr_data = out.read(ext_attr_bytes)
+            if len(attr_data) != ext_attr_bytes:
+                raise ValueError(f"Could not read extended attributes for '{target.path}'.")
+            out.seek(new_extent * SECTOR_SIZE)
+            out.write(attr_data)
+        data_sector = new_extent + target.ext_attr_length
+        end_sector = data_sector + (payload_size + SECTOR_SIZE - 1) // SECTOR_SIZE
+        if end_sector > 0xFFFFFFFF:
+            raise ValueError("The patched image would exceed ISO9660's supported 32-bit sector address space.")
+    else:
+        new_extent = target.extent
+        data_sector = target.data_extent
+        end_sector = next_free_sector
+
+    out.seek(data_sector * SECTOR_SIZE)
+    with open(payload_path, "rb") as payload:
+        shutil.copyfileobj(payload, out, length=1024 * 1024)
+
+    if relocated:
+        padded_end = end_sector * SECTOR_SIZE
+        actual_end = data_sector * SECTOR_SIZE + payload_size
+        if padded_end > actual_end:
+            out.seek(actual_end)
+            out.write(b"\x00" * (padded_end - actual_end))
+        # Extent and size are both stored in little- and big-endian form.
+        out.seek(target.record_offset + 2)
+        out.write(write_both32(new_extent))
+        next_free_sector = end_sector
+
+    out.seek(target.record_offset + 10)
+    out.write(write_both32(payload_size))
+    return next_free_sector, relocated
+
+
+def _update_iso_volume_space_size(out, total_sectors: int) -> None:
+    """Update ISO9660 PVD/SVD volume-space-size fields after appending data."""
+    if not 0 < total_sectors <= 0xFFFFFFFF:
+        raise ValueError("The patched image size exceeds ISO9660's supported sector count.")
+    # ISO9660 volume descriptor sets begin at sector 16 and end with type 255.
+    for sector in range(PVD_FIRST_SECTOR, 256):
+        start = sector * SECTOR_SIZE
+        out.seek(start)
+        desc = out.read(SECTOR_SIZE)
+        if len(desc) != SECTOR_SIZE or desc[1:6] != b"CD001" or desc[6] != 1:
+            break
+        if desc[0] in (1, 2):  # Primary or supplementary volume descriptor
+            out.seek(start + 80)
+            out.write(write_both32(total_sectors))
+        if desc[0] == 255:
+            break
 
 
 def clean_iso_name(raw: bytes) -> str:
@@ -350,7 +426,7 @@ def identify_vcs_ps2_iso(image: Iso9660) -> str:
     )
 
 
-def check_image_and_patch(iso_path: Path, output_path: Path, payload_path: Path, status_callback=lambda s: None) -> str:
+def _check_image_and_patch_iso(iso_path: Path, output_path: Path, payload_path: Path, status_callback=lambda s: None) -> str:
     if not iso_path.is_file():
         raise ValueError("Please choose an existing ISO image.")
     if not payload_path.is_file():
@@ -397,7 +473,10 @@ def check_image_and_patch(iso_path: Path, output_path: Path, payload_path: Path,
     status_callback(f"Creating patched copy (target: {target.path})…")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        shutil.copy2(iso_path, output_path)
+        # Copy only file contents. copy2() preserves the source file's read-only
+        # attributes on Windows; then opening the copied image with r+b can fail
+        # with PermissionError even though the user selected a writable folder.
+        shutil.copyfile(iso_path, output_path)
         status_callback("Writing replacement audio…")
         with open(output_path, "r+b") as out, open(payload_path, "rb") as payload:
             out.seek(target.data_extent * SECTOR_SIZE)
@@ -461,7 +540,7 @@ def identify_vcs_psp_iso(image: Iso9660) -> str:
     )
 
 
-def check_psp_image_and_patch(
+def _check_psp_image_and_patch_iso(
     iso_path: Path,
     output_path: Path,
     payload_paths: dict[str, Path],
@@ -523,14 +602,6 @@ def check_psp_image_and_patch(
         if target.size <= 0 or target.end_sector > image.total_sectors:
             raise ValueError(f"The target '{target_path}' has an invalid extent; refusing to patch it.")
 
-        payload_size = resolved_payloads[payload_name].stat().st_size
-        allocated_bytes = target.sectors * SECTOR_SIZE
-        if payload_size > allocated_bytes:
-            raise ValueError(
-                f"Replacement '{payload_name}' is {payload_size:,} bytes, but the original ISO reserves only "
-                f"{allocated_bytes:,} bytes for '{target_path}'. This build will not relocate ISO file data. "
-                "Use a replacement no larger than the existing allocated space; no changes were made."
-            )
         # Ensure no other file/directory extent overlaps this target allocation.
         for rec in records:
             if rec.record_offset == target.record_offset or rec.sectors == 0:
@@ -554,19 +625,24 @@ def check_psp_image_and_patch(
     status_callback("Creating a patched ISO copy…")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        shutil.copy2(iso_path, output_path)
+        # Copy only file contents. copy2() preserves the source file's read-only
+        # attributes on Windows; then opening the copied image with r+b can fail
+        # with PermissionError even though the user selected a writable folder.
+        shutil.copyfile(iso_path, output_path)
+        relocated_targets: set[str] = set()
+        next_free_sector = image.total_sectors
         with open(output_path, "r+b") as out:
             for index, payload_name in enumerate(active_target_paths, start=1):
                 target = targets[payload_name]
                 payload_path = resolved_payloads[payload_name]
-                payload_size = payload_path.stat().st_size
                 status_callback(f"Writing file {index}/{len(active_target_paths)}: {payload_name}…")
-                with open(payload_path, "rb") as payload:
-                    out.seek(target.data_extent * SECTOR_SIZE)
-                    shutil.copyfileobj(payload, out, length=1024 * 1024)
-                # Keep the two-endian ISO9660 directory entry size in sync.
-                out.seek(target.record_offset + 10)
-                out.write(write_both32(payload_size))
+                next_free_sector, relocated = _write_iso_replacement(
+                    out, target, payload_path, next_free_sector
+                )
+                if relocated:
+                    relocated_targets.add(payload_name)
+                    status_callback(f"Relocated larger replacement {payload_name} to new ISO sectors…")
+            _update_iso_volume_space_size(out, next_free_sector)
             out.flush()
             os.fsync(out.fileno())
     except Exception:
@@ -578,6 +654,7 @@ def check_psp_image_and_patch(
 
     details = "\n".join(
         f"  {active_target_paths[name]}\n    {targets[name].size:,} → {resolved_payloads[name].stat().st_size:,} bytes"
+        + (" (relocated to a new ISO extent)" if name in relocated_targets else "")
         for name in active_target_paths
     )
     return (
@@ -621,7 +698,7 @@ def identify_lcs_psp_iso(image: Iso9660) -> str:
     )
 
 
-def check_lcs_psp_image_and_patch(
+def _check_lcs_psp_image_and_patch_iso(
     iso_path: Path,
     output_path: Path,
     payload_paths: dict[str, Path],
@@ -683,14 +760,6 @@ def check_lcs_psp_image_and_patch(
             raise ValueError(f"The target '{target_path}' is split across multiple ISO extents; this patcher will not modify it.")
         if target.size <= 0 or target.end_sector > image.total_sectors:
             raise ValueError(f"The target '{target_path}' has an invalid extent; refusing to patch it.")
-        payload_size = resolved_payloads[payload_name].stat().st_size
-        allocated_bytes = target.sectors * SECTOR_SIZE
-        if payload_size > allocated_bytes:
-            raise ValueError(
-                f"Replacement '{payload_name}' is {payload_size:,} bytes, but the ISO reserves only "
-                f"{allocated_bytes:,} bytes for '{target_path}'. This patcher will not relocate ISO file data. "
-                "No changes were made."
-            )
         # Don't overwrite an allocation shared by another ISO file/directory.
         for other in records:
             if other.record_offset == target.record_offset or other.sectors == 0:
@@ -709,19 +778,24 @@ def check_lcs_psp_image_and_patch(
     status_callback("Creating a patched LCS PSP ISO copy…")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        shutil.copy2(iso_path, output_path)
+        # Copy only file contents. copy2() preserves the source file's read-only
+        # attributes on Windows; then opening the copied image with r+b can fail
+        # with PermissionError even though the user selected a writable folder.
+        shutil.copyfile(iso_path, output_path)
+        relocated_targets: set[str] = set()
+        next_free_sector = image.total_sectors
         with open(output_path, "r+b") as out:
             for index, payload_name in enumerate(LCS_PSP_TARGET_PATHS, start=1):
                 target = targets[payload_name]
                 payload_path = resolved_payloads[payload_name]
-                payload_size = payload_path.stat().st_size
                 status_callback(f"Writing file {index}/{len(LCS_PSP_TARGET_PATHS)}: {payload_name}…")
-                with open(payload_path, "rb") as payload:
-                    out.seek(target.data_extent * SECTOR_SIZE)
-                    shutil.copyfileobj(payload, out, length=1024 * 1024)
-                # Update ISO9660 directory entry size (little-endian + big-endian).
-                out.seek(target.record_offset + 10)
-                out.write(write_both32(payload_size))
+                next_free_sector, relocated = _write_iso_replacement(
+                    out, target, payload_path, next_free_sector
+                )
+                if relocated:
+                    relocated_targets.add(payload_name)
+                    status_callback(f"Relocated larger replacement {payload_name} to new ISO sectors…")
+            _update_iso_volume_space_size(out, next_free_sector)
             out.flush()
             os.fsync(out.fileno())
     except Exception:
@@ -733,6 +807,7 @@ def check_lcs_psp_image_and_patch(
 
     details = "\n".join(
         f"  {LCS_PSP_TARGET_PATHS[name]}\n    {targets[name].size:,} → {resolved_payloads[name].stat().st_size:,} bytes"
+        + (" (relocated to a new ISO extent)" if name in relocated_targets else "")
         for name in LCS_PSP_TARGET_PATHS
     )
     return (
@@ -740,6 +815,281 @@ def check_lcs_psp_image_and_patch(
         f"Files replaced:\n{details}\n\nThe source ISO was left unchanged. This patch is experimental and has not been verified in-game. "
         "Test the patched ISO in PPSSPP first."
     )
+
+
+# Standard CSO/CISO v1 and experimental v2 support. CSO v2 blocks may use
+# raw DEFLATE (index high bit clear), raw LZ4 blocks (high bit set), or be stored
+# uncompressed when the encoded span is at least one full block.
+def _lz4_block_decompress(data: bytes, expected_size: int) -> bytes:
+    """Decode one raw LZ4 block without requiring a third-party package."""
+    out = bytearray()
+    i = 0
+    while i < len(data):
+        token = data[i]
+        i += 1
+        literal_len = token >> 4
+        if literal_len == 15:
+            while True:
+                if i >= len(data):
+                    raise ValueError("Truncated LZ4 literal length.")
+                extra = data[i]
+                i += 1
+                literal_len += extra
+                if extra != 255:
+                    break
+        if i + literal_len > len(data):
+            raise ValueError("Truncated LZ4 literals.")
+        out.extend(data[i:i + literal_len])
+        i += literal_len
+        if i == len(data):
+            break
+        if i + 2 > len(data):
+            raise ValueError("Truncated LZ4 match offset.")
+        offset = data[i] | (data[i + 1] << 8)
+        i += 2
+        if offset == 0 or offset > len(out):
+            raise ValueError("Invalid LZ4 match offset.")
+        match_len = token & 0x0F
+        if match_len == 15:
+            while True:
+                if i >= len(data):
+                    raise ValueError("Truncated LZ4 match length.")
+                extra = data[i]
+                i += 1
+                match_len += extra
+                if extra != 255:
+                    break
+        match_len += 4
+        for _ in range(match_len):
+            out.append(out[-offset])
+        if len(out) > expected_size:
+            raise ValueError("LZ4 block expands beyond its expected size.")
+    if len(out) != expected_size:
+        raise ValueError(f"LZ4 block expands to {len(out)} bytes; expected {expected_size}.")
+    return bytes(out)
+
+
+def _cso_version(cso_path: Path) -> int:
+    with open(cso_path, "rb") as src:
+        header = src.read(24)
+    if len(header) < 24 or header[:4] != b"CISO":
+        raise ValueError("The selected .cso file does not have a valid CISO header.")
+    version = header[20]
+    if version not in (0, 1, 2):
+        raise ValueError(f"CSO version {version} is not supported; versions 0, 1, and 2 are supported.")
+    return version
+
+
+def _cso_to_iso(cso_path: Path, iso_path: Path) -> None:
+    file_size = cso_path.stat().st_size
+    with open(cso_path, "rb") as src:
+        header = src.read(24)
+        if len(header) < 24 or header[:4] != b"CISO":
+            raise ValueError("The selected .cso file does not have a valid CISO header.")
+        header_size = struct.unpack_from("<I", header, 4)[0]
+        total_bytes = struct.unpack_from("<Q", header, 8)[0]
+        block_size = struct.unpack_from("<I", header, 16)[0]
+        version = header[20]
+        align = header[21]
+        if header_size < 24 or block_size <= 0 or total_bytes <= 0:
+            raise ValueError("The CSO header contains invalid size values.")
+        if version not in (0, 1, 2):
+            raise ValueError(f"CSO version {version} is not supported; versions 0, 1, and 2 are supported.")
+        if version == 2 and (header_size != 24 or header[22:24] != b"\x00\x00"):
+            raise ValueError("The CSO v2 header is invalid; v2 requires a 24-byte header and zero reserved bytes.")
+        if align > 31:
+            raise ValueError("The CSO header uses an unsupported index alignment value.")
+        block_count = (total_bytes + block_size - 1) // block_size
+        index_bytes = (block_count + 1) * 4
+        if header_size + index_bytes > file_size:
+            raise ValueError("The CSO index table is truncated.")
+        src.seek(header_size)
+        raw_indexes = src.read(index_bytes)
+        if len(raw_indexes) != index_bytes:
+            raise ValueError("Could not read the complete CSO index table.")
+        indexes = list(struct.unpack("<" + "I" * (block_count + 1), raw_indexes))
+        if version == 2 and indexes[-1] & 0x80000000:
+            raise ValueError("The final index entry in a CSO v2 image must not have its high bit set.")
+        with open(iso_path, "wb") as dst:
+            for i in range(block_count):
+                start = (indexes[i] & 0x7FFFFFFF) << align
+                end = (indexes[i + 1] & 0x7FFFFFFF) << align
+                expected = min(block_size, total_bytes - i * block_size)
+                if start < header_size + index_bytes or end < start or end > file_size:
+                    raise ValueError(f"The CSO index for block {i} points outside the data region.")
+                src.seek(start)
+                encoded = src.read(end - start)
+                if len(encoded) != end - start or not encoded:
+                    raise ValueError(f"CSO block {i} is truncated.")
+                if version == 2:
+                    # In v2 a full-block-or-larger span is stored uncompressed.
+                    if len(encoded) >= block_size:
+                        decoded = encoded[:expected]
+                    elif indexes[i] & 0x80000000:
+                        try:
+                            decoded = _lz4_block_decompress(encoded, expected)
+                        except ValueError as exc:
+                            raise ValueError(f"CSO v2 LZ4 block {i} could not be decompressed: {exc}") from exc
+                    else:
+                        try:
+                            decoded = zlib.decompress(encoded, -zlib.MAX_WBITS)
+                        except zlib.error:
+                            try:
+                                decoded = zlib.decompress(encoded)
+                            except zlib.error as exc:
+                                raise ValueError(f"CSO v2 deflate block {i} could not be decompressed.") from exc
+                elif indexes[i] & 0x80000000:
+                    decoded = encoded
+                else:
+                    try:
+                        decoded = zlib.decompress(encoded)
+                    except zlib.error:
+                        try:
+                            decoded = zlib.decompress(encoded, -zlib.MAX_WBITS)
+                        except zlib.error as exc:
+                            raise ValueError(f"CSO block {i} could not be decompressed.") from exc
+                if len(decoded) != expected:
+                    raise ValueError(f"CSO block {i} expands to {len(decoded)} bytes; expected {expected}.")
+                dst.write(decoded)
+
+
+def _iso_to_cso(iso_path: Path, cso_path: Path, status_callback=lambda s: None, version: int = 1) -> None:
+    total_bytes = iso_path.stat().st_size
+    if total_bytes <= 0:
+        raise ValueError("The patched ISO is empty; cannot create a CSO file.")
+    if version not in (1, 2):
+        version = 1
+    block_size = SECTOR_SIZE
+    block_count = (total_bytes + block_size - 1) // block_size
+    table_size = (block_count + 1) * 4
+    header_size = 24
+    data_start = header_size + table_size
+    indexes: list[int] = []
+    current_offset = data_start
+    cso_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(iso_path, "rb") as src, open(cso_path, "w+b") as dst:
+            dst.write(b"\x00" * data_start)
+            for i in range(block_count):
+                chunk = src.read(block_size)
+                if not chunk:
+                    raise ValueError("Unexpected end of patched ISO while compressing to CSO.")
+                # CSO v2 index high-bit denotes LZ4, not uncompressed data. This
+                # writer uses the broadly supported DEFLATE method and stores raw
+                # blocks whenever compression would occupy a complete block.
+                compressed = zlib.compress(chunk, 6)
+                deflated = zlib.compressobj(6, zlib.DEFLATED, -zlib.MAX_WBITS)
+                raw_deflate = deflated.compress(chunk) + deflated.flush()
+                if version == 2:
+                    if len(raw_deflate) < len(chunk):
+                        encoded = raw_deflate
+                        index_value = current_offset
+                    else:
+                        # V2 detects raw blocks by a full block-sized span, so pad
+                        # the final short sector block if the ISO is not aligned.
+                        encoded = chunk.ljust(block_size, b"\x00")
+                        index_value = current_offset
+                elif len(compressed) >= len(chunk):
+                    encoded = chunk
+                    index_value = current_offset | 0x80000000
+                else:
+                    encoded = compressed
+                    index_value = current_offset
+                if current_offset >= 0x80000000:
+                    raise ValueError("This image is too large for the standard CSO index offset table.")
+                indexes.append(index_value)
+                dst.seek(current_offset)
+                dst.write(encoded)
+                current_offset += len(encoded)
+                if i % 4096 == 0:
+                    status_callback(f"Compressing patched CSO v{version} image: block {i + 1:,}/{block_count:,}…")
+            indexes.append(current_offset)
+            if current_offset >= 0x80000000:
+                raise ValueError("This image is too large for the standard CSO index offset table.")
+            dst.seek(0)
+            dst.write(b"CISO")
+            dst.write(struct.pack("<I", header_size))
+            dst.write(struct.pack("<Q", total_bytes))
+            dst.write(struct.pack("<I", block_size))
+            dst.write(bytes((version, 0, 0, 0)))
+            dst.write(struct.pack("<" + "I" * len(indexes), *indexes))
+            dst.flush()
+            os.fsync(dst.fileno())
+    except Exception:
+        try:
+            cso_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+def _run_with_cso_support(core, source_path: Path, output_path: Path, core_args: tuple, status_callback=lambda s: None) -> str:
+    source_path = Path(source_path).expanduser().resolve()
+    output_path = Path(output_path).expanduser().resolve()
+    source_ext = source_path.suffix.casefold()
+    output_ext = output_path.suffix.casefold()
+    if source_ext not in {".iso", ".cso", ".bin", ".img"}:
+        raise ValueError("Input must be an ISO or CSO image (PS2 tabs also accept 2048-byte .bin/.img images).")
+    if output_ext not in {".iso", ".cso"}:
+        raise ValueError("Output filename must end in .iso or .cso.")
+    if source_path == output_path:
+        raise ValueError("The output path must differ from the source image. The source will never be overwritten.")
+    if not source_path.is_file():
+        raise ValueError("Please choose an existing ISO/CSO image.")
+    if output_path.exists():
+        raise FileExistsError(f"The output file already exists: {output_path}\nChoose a different output filename.")
+
+    temporary_paths: list[Path] = []
+    cso_output_version = _cso_version(source_path) if source_ext == ".cso" and output_ext == ".cso" else 1
+    source_iso = source_path
+    patched_iso = output_path
+    try:
+        if source_ext == ".cso":
+            fd, name = tempfile.mkstemp(prefix="hololive_source_", suffix=".iso")
+            os.close(fd)
+            source_iso = Path(name)
+            temporary_paths.append(source_iso)
+            status_callback("Decompressing source CSO image…")
+            _cso_to_iso(source_path, source_iso)
+        if output_ext == ".cso":
+            fd, name = tempfile.mkstemp(prefix="hololive_patched_", suffix=".iso")
+            os.close(fd)
+            patched_iso = Path(name)
+            temporary_paths.append(patched_iso)
+            # The core patcher expects its output not to exist.
+            patched_iso.unlink(missing_ok=True)
+        result = core(source_iso, patched_iso, *core_args, status_callback)
+        if output_ext == ".cso":
+            status_callback("Compressing patched ISO into CSO…")
+            _iso_to_cso(patched_iso, output_path, status_callback, version=cso_output_version)
+        result = result.replace(str(source_iso), str(source_path)).replace(str(patched_iso), str(output_path))
+        if output_ext == ".cso":
+            result = result.replace("Patched ISO", "Patched CSO").replace("ISO copy", "CSO copy")
+        return result
+    except Exception:
+        if output_ext == ".cso":
+            try:
+                output_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    finally:
+        for temporary in temporary_paths:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def check_image_and_patch(iso_path: Path, output_path: Path, payload_path: Path, status_callback=lambda s: None) -> str:
+    return _run_with_cso_support(_check_image_and_patch_iso, iso_path, output_path, (payload_path,), status_callback)
+
+
+def check_psp_image_and_patch(iso_path: Path, output_path: Path, payload_paths: dict[str, Path], status_callback=lambda s: None) -> str:
+    return _run_with_cso_support(_check_psp_image_and_patch_iso, iso_path, output_path, (payload_paths,), status_callback)
+
+
+def check_lcs_psp_image_and_patch(iso_path: Path, output_path: Path, payload_paths: dict[str, Path], status_callback=lambda s: None) -> str:
+    return _run_with_cso_support(_check_lcs_psp_image_and_patch_iso, iso_path, output_path, (payload_paths,), status_callback)
 
 
 def _find_child_case_insensitive(parent: Path, name: str, want_directory: bool) -> Path:
@@ -1053,13 +1403,13 @@ class App:
 
         row1 = ttk.Frame(parent)
         row1.pack(fill="x", pady=4)
-        ttk.Label(row1, text="Input ISO", width=11).pack(side="left")
+        ttk.Label(row1, text="Input ISO/CSO", width=14).pack(side="left")
         ttk.Entry(row1, textvariable=self.iso_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row1, text="Browse…", command=self._choose_iso).pack(side="left")
 
         row2 = ttk.Frame(parent)
         row2.pack(fill="x", pady=4)
-        ttk.Label(row2, text="Output ISO", width=11).pack(side="left")
+        ttk.Label(row2, text="Output ISO/CSO", width=14).pack(side="left")
         ttk.Entry(row2, textvariable=self.out_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row2, text="Save as…", command=self._choose_output).pack(side="left")
 
@@ -1077,7 +1427,7 @@ class App:
         ttk.Label(parent, textvariable=self.status_var, wraplength=690).pack(anchor="w")
         ttk.Label(
             parent,
-            text="Supports plain 2048-byte-sector ISO9660 images. Compressed ISZ and raw 2352-byte images are not supported.",
+            text="Supports ISO and CSO v1/v2 images containing a 2048-byte-sector ISO9660 filesystem. CSO v2 is experimental; ISZ and raw 2352-byte images are not supported.",
             foreground="#555555", wraplength=690,
         ).pack(anchor="w", pady=(12, 0))
 
@@ -1090,13 +1440,13 @@ class App:
 
         row1 = ttk.Frame(parent)
         row1.pack(fill="x", pady=4)
-        ttk.Label(row1, text="Input ISO", width=11).pack(side="left")
+        ttk.Label(row1, text="Input ISO/CSO", width=14).pack(side="left")
         ttk.Entry(row1, textvariable=self.psp_iso_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row1, text="Browse…", command=self._choose_psp_iso).pack(side="left")
 
         row2 = ttk.Frame(parent)
         row2.pack(fill="x", pady=4)
-        ttk.Label(row2, text="Output ISO", width=11).pack(side="left")
+        ttk.Label(row2, text="Output ISO/CSO", width=14).pack(side="left")
         ttk.Entry(row2, textvariable=self.psp_out_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row2, text="Save as…", command=self._choose_psp_output).pack(side="left")
 
@@ -1121,7 +1471,7 @@ class App:
         ttk.Label(parent, textvariable=self.psp_status_var, wraplength=690).pack(anchor="w")
         ttk.Label(
             parent,
-            text="Plain 2048-byte-sector ISO9660 only. Built-in assets must fit the ISO's existing allocated space; the original ISO is not modified.",
+            text="Supports ISO and CSO v1/v2 images with a 2048-byte-sector ISO9660 filesystem (CSO v2 is experimental). Larger replacement files are relocated to new ISO sectors; the original ISO is not modified.",
             foreground="#555555", wraplength=690,
         ).pack(anchor="w", pady=(12, 0))
 
@@ -1134,13 +1484,13 @@ class App:
 
         row1 = ttk.Frame(parent)
         row1.pack(fill="x", pady=4)
-        ttk.Label(row1, text="Input ISO", width=11).pack(side="left")
+        ttk.Label(row1, text="Input ISO/CSO", width=14).pack(side="left")
         ttk.Entry(row1, textvariable=self.lcs_iso_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row1, text="Browse…", command=self._choose_lcs_iso).pack(side="left")
 
         row2 = ttk.Frame(parent)
         row2.pack(fill="x", pady=4)
-        ttk.Label(row2, text="Output ISO", width=11).pack(side="left")
+        ttk.Label(row2, text="Output ISO/CSO", width=14).pack(side="left")
         ttk.Entry(row2, textvariable=self.lcs_out_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row2, text="Save as…", command=self._choose_lcs_output).pack(side="left")
 
@@ -1166,7 +1516,7 @@ class App:
         ttk.Label(parent, textvariable=self.lcs_status_var, wraplength=690).pack(anchor="w")
         ttk.Label(
             parent,
-            text="Plain 2048-byte-sector ISO9660 only. Built-in assets must fit the ISO's existing allocated space; the original ISO is not modified.",
+            text="Supports ISO and CSO v1/v2 images with a 2048-byte-sector ISO9660 filesystem (CSO v2 is experimental). Larger replacement files are relocated to new ISO sectors; the original ISO is not modified.",
             foreground="#555555", wraplength=690,
         ).pack(anchor="w", pady=(12, 0))
 
@@ -1241,20 +1591,21 @@ class App:
     def _choose_iso(self):
         path = filedialog.askopenfilename(
             title="Select GTA: Vice City Stories (PS2) ISO",
-            filetypes=[("PS2 disc images", "*.iso *.bin *.img"), ("All files", "*.*")],
+            filetypes=[("ISO/CSO disc images", "*.iso *.cso *.bin *.img"), ("All files", "*.*")],
         )
         if path:
             self.iso_var.set(path)
             p = Path(path)
-            suggestion = p.with_name(p.stem + "_HOLOLIVE_RADIO_PATCHED.iso")
+            suggested_ext = ".cso" if p.suffix.casefold() == ".cso" else ".iso"
+            suggestion = p.with_name(p.stem + "_HOLOLIVE_RADIO_PATCHED" + suggested_ext)
             if not self.out_var.get():
                 self.out_var.set(str(suggestion))
 
     def _choose_output(self):
         initial = self.out_var.get() or "HOLOLIVE_RADIO_PATCHED.iso"
         path = filedialog.asksaveasfilename(
-            title="Save patched ISO as", initialfile=Path(initial).name,
-            defaultextension=".iso", filetypes=[("ISO image", "*.iso"), ("All files", "*.*")],
+            title="Save patched ISO/CSO as", initialfile=Path(initial).name,
+            defaultextension=".iso", filetypes=[("ISO image", "*.iso"), ("CSO image", "*.cso"), ("All files", "*.*")],
         )
         if path:
             self.out_var.set(path)
@@ -1262,19 +1613,20 @@ class App:
     def _choose_psp_iso(self):
         path = filedialog.askopenfilename(
             title="Select GTA: Vice City Stories (PSP) ISO",
-            filetypes=[("PSP ISO images", "*.iso"), ("All files", "*.*")],
+            filetypes=[("PSP ISO/CSO images", "*.iso *.cso"), ("All files", "*.*")],
         )
         if path:
             self.psp_iso_var.set(path)
             p = Path(path)
             if not self.psp_out_var.get():
-                self.psp_out_var.set(str(p.with_name(p.stem + "_HOLOLIVE_RADIO_PATCHED.iso")))
+                suggested_ext = ".cso" if p.suffix.casefold() == ".cso" else ".iso"
+                self.psp_out_var.set(str(p.with_name(p.stem + "_HOLOLIVE_RADIO_PATCHED" + suggested_ext)))
 
     def _choose_psp_output(self):
         initial = self.psp_out_var.get() or "VCS_PSP_HOLOLIVE_RADIO_PATCHED.iso"
         path = filedialog.asksaveasfilename(
-            title="Save patched PSP ISO as", initialfile=Path(initial).name,
-            defaultextension=".iso", filetypes=[("ISO image", "*.iso"), ("All files", "*.*")],
+            title="Save patched PSP ISO/CSO as", initialfile=Path(initial).name,
+            defaultextension=".iso", filetypes=[("ISO image", "*.iso"), ("CSO image", "*.cso"), ("All files", "*.*")],
         )
         if path:
             self.psp_out_var.set(path)
@@ -1287,7 +1639,7 @@ class App:
             "• PSP_GAME\\USRDIR\\RUNDATA\\ENGLISH.GXT\n"
             "• PSP_GAME\\USRDIR\\RUNDATA\\PSP\\GAME.DTZ\n\n"
             "All three replacement files must be present in Assets\\VCS_PSP when the EXE is built. They are bundled into the EXE and applied automatically; the PSP tab does not show replacement-file pickers. "
-            "It creates a new ISO and never overwrites the input. The audio must fit within the target's existing sector allocation. "
+            "It creates a new ISO or CSO and never overwrites the input. Larger replacements are relocated to new ISO sectors and directory entries are updated. "
             "This ISO patch is experimental and has not been verified in-game; test in PPSSPP first. Use only with a game image you are entitled to modify.",
         )
 
@@ -1323,8 +1675,8 @@ class App:
             return
         if not messagebox.askyesno(
             "Confirm experimental PSP patch",
-            "Create a new patched GTA: Vice City Stories (PSP) ISO?\n\n"
-            "The input ISO must have a recognized VCS PSP disc ID. The embedded VCPR.AT3, ENGLISH.GXT, and GAME.DTZ files will all replace their matching ISO entries if each fits its existing allocation.\n\n"
+            "Create a new patched GTA: Vice City Stories (PSP) ISO/CSO?\n\n"
+            "The input ISO/CSO must have a recognized VCS PSP disc ID. The image must contain all three target paths; larger replacements are relocated to new ISO sectors and directory entries are updated.\n\n"
             "The original ISO will not be modified. This patch has not been verified in-game.",
         ):
             return
@@ -1368,19 +1720,20 @@ class App:
     def _choose_lcs_iso(self):
         path = filedialog.askopenfilename(
             title="Select GTA: Liberty City Stories (PSP) ISO",
-            filetypes=[("PSP ISO images", "*.iso"), ("All files", "*.*")],
+            filetypes=[("PSP ISO/CSO images", "*.iso *.cso"), ("All files", "*.*")],
         )
         if path:
             self.lcs_iso_var.set(path)
             p = Path(path)
             if not self.lcs_out_var.get():
-                self.lcs_out_var.set(str(p.with_name(p.stem + "_HOLOLIVE_RADIO_PATCHED.iso")))
+                suggested_ext = ".cso" if p.suffix.casefold() == ".cso" else ".iso"
+                self.lcs_out_var.set(str(p.with_name(p.stem + "_HOLOLIVE_RADIO_PATCHED" + suggested_ext)))
 
     def _choose_lcs_output(self):
         initial = self.lcs_out_var.get() or "LCS_PSP_HOLOLIVE_RADIO_PATCHED.iso"
         path = filedialog.asksaveasfilename(
-            title="Save patched LCS PSP ISO as", initialfile=Path(initial).name,
-            defaultextension=".iso", filetypes=[("ISO image", "*.iso"), ("All files", "*.*")],
+            title="Save patched LCS PSP ISO/CSO as", initialfile=Path(initial).name,
+            defaultextension=".iso", filetypes=[("ISO image", "*.iso"), ("CSO image", "*.cso"), ("All files", "*.*")],
         )
         if path:
             self.lcs_out_var.set(path)
@@ -1393,7 +1746,7 @@ class App:
             "• PSP_GAME\\USRDIR\\TEXT\\ENGLISH.GXT\n"
             "• PSP_GAME\\USRDIR\\CHK\\PSPHR\\GAME.DTZ\n\n"
             "All three files must be present in Assets\\LCS_PSP when the EXE is built. They are embedded and applied automatically; the LCS tab does not show replacement-file pickers. "
-            "It creates a new ISO and never overwrites the input. Each replacement must fit the target's existing sector allocation; ISO file data is not relocated. "
+            "It creates a new ISO or CSO and never overwrites the input. Larger replacements are appended to new ISO sectors and the directory entries are updated. "
             "This ISO patch is experimental and has not been verified in-game. Test in PPSSPP first.",
         )
 
@@ -1421,8 +1774,8 @@ class App:
             return
         if not messagebox.askyesno(
             "Confirm experimental LCS PSP patch",
-            "Create a new patched GTA: Liberty City Stories (PSP) ISO?\n\n"
-            "The input ISO must have a recognized LCS PSP disc ID. The embedded KJAH.AT3, ENGLISH.GXT, and GAME.DTZ files will replace their matching ISO entries if each fits its existing allocation.\n\n"
+            "Create a new patched GTA: Liberty City Stories (PSP) ISO/CSO?\n\n"
+            "The input ISO/CSO must have a recognized LCS PSP disc ID. The image must contain all three target paths; larger replacements are relocated to new ISO sectors and directory entries are updated.\n\n"
             "The original ISO will not be modified. This patch has not been verified in-game.",
         ):
             return
@@ -1461,6 +1814,10 @@ class App:
                         messagebox.showerror("Could not patch LCS PSP ISO", str(value))
         except queue.Empty:
             pass
+        # Keep polling for worker status/completion. Without this recurring call,
+        # the LCS tab can remain stuck on “Starting LCS PSP ISO check…” forever
+        # even after the background patch worker has completed or failed.
+        self.root.after(100, self._poll_lcs_events)
 
     def _choose_pc_dir(self):
         path = filedialog.askdirectory(title="Locate your GTA: Vice City PC installation", mustexist=True)
@@ -1472,7 +1829,7 @@ class App:
         messagebox.showinfo(
             "About / Safety",
             "The GTA VCS PS2 tab checks SYSTEM.CNF against known GTA: Vice City Stories (PS2) disc serials, then replaces AUDIO/MUSIC/VCPR.VB with the bundled experimental audio file.\n\n"
-            "Classic GTA: Vice City (PS2) is not supported by this tab. The patch is experimental and has not been verified in-game. It creates a new output ISO and leaves the source image unchanged.\n\n"
+            "Classic GTA: Vice City (PS2) is not supported by this tab. The patch is experimental and has not been verified in-game. It creates a new ISO or CSO output and leaves the source image unchanged.\n\n"
             "Use only with a game image you are entitled to modify.",
         )
 
