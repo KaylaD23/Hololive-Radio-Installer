@@ -2,18 +2,9 @@
 setlocal
 cd /d "%~dp0"
 echo ================================================================
-echo   Building GTA Vice City ^& Vice City Stories Hololive Installer
+echo   Building Grand Theft Auto Hololive Radio Installer
 echo ================================================================
 echo.
-if not exist "VCPR.VB" (
-  echo ERROR: Required payload VCPR.VB was not found in this folder.
-  echo Obtain the matching audio payload from the project's release, if available,
-  echo and copy VCPR.VB next to this build script. The large audio payload is
-  echo intentionally not tracked in the source repository.
-  echo.
-  pause
-  exit /b 1
-)
 where py >nul 2>nul
 if errorlevel 1 (
   echo Python was not found. Install Python 3.10 or newer from https://www.python.org/downloads/windows/
@@ -23,12 +14,34 @@ if errorlevel 1 (
 )
 py -m pip install --upgrade pip pyinstaller
 if errorlevel 1 goto failed
-py -m PyInstaller --clean --noconfirm --onefile --windowed --name "GTA Vice City & Vice City Stories Hololive Radio Installer" --icon "hololive_radio_icon.ico" --add-data "VCPR.VB;." --add-data "hololive_radio_icon.ico;." --add-data "0865a12018fbd34f84b2c05c.png;." "GTA_Vice_City_Vice_City_Stories_Hololive_Radio_Installer.py"
+py build_windows_exe.py
 if errorlevel 1 goto failed
 echo.
-echo Build complete: dist\GTA Vice City ^& Vice City Stories Hololive Radio Installer.exe
-echo The EXE includes the replacement audio payload and Hololive application icon.
-echo NOTE: This build currently supports GTA: Vice City Stories PS2 only; Vice City is not supported yet.
+echo Build complete. Look for dist\HololiveRadioInstaller.exe.
+echo.
+echo For a self-contained PC installer, put these three files in Assets\VC_PC or beside this BAT:
+echo   american.gxt
+echo   fronten2.txd
+echo   VCPR.adf
+echo The build script checks both locations and embeds found files.
+echo Required VCS PSP assets must be present in Assets\VCS_PSP on this PC:
+echo   VCPR.AT3
+echo   ENGLISH.GXT
+echo   GAME.DTZ
+echo The build script stops if any of those three files is missing or empty.
+echo All three are embedded in the EXE and patched automatically.
+echo The VCS PSP tab only asks for Input ISO and Output ISO; its files are embedded.
+echo Required LCS PSP assets must also be present in Assets\LCS_PSP on this PC:
+echo   KJAH.AT3
+echo   ENGLISH.GXT
+echo   GAME.DTZ
+echo The build script stops if any of the three LCS files is missing or empty.
+echo All three are embedded in the EXE and patched automatically.
+echo The LCS PSP tab only asks for Input ISO and Output ISO; no replacement-file pickers are shown.
+echo PyInstaller temporary build files are placed in your TEMP folder to keep paths short.
+echo The PC tab installs them to TEXT/american.gxt, models/fronten2.txd, audio/VCPR.adf.
+echo VCS PS2 ISO support requires VCPR.VB; classic GTA Vice City PS2 is not supported by this tab.
+echo GTA Vice City PS2 and GTA SA PC tabs remain disabled as Coming Soon.
 pause
 exit /b 0
 :failed

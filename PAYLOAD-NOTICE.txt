@@ -1,4 +1,9 @@
-VCPR.VB is required to run the patcher and build the self-contained Windows EXE.
-It is not included in this source-only archive because it is a large binary asset
-and its redistribution rights need separate consideration. Put an authorized
-VCPR.VB payload in this folder before running the program/build script.
+Game mod payload files used by the installer:
+- Assets/VCS_PSP/VCPR.AT3, Assets/VCS_PSP/ENGLISH.GXT, and Assets/VCS_PSP/GAME.DTZ are all required local build inputs for GTA: Vice City Stories (PSP).
+- Assets/LCS_PSP/KJAH.AT3, Assets/LCS_PSP/ENGLISH.GXT, and Assets/LCS_PSP/GAME.DTZ are all required local build inputs for GTA: Liberty City Stories (PSP).
+- The build script verifies that each required PSP payload exists and is non-empty, then embeds it with its game-specific Assets subfolder path in the one-file EXE. Neither PSP tab includes payload file pickers.
+- VCPR.VB enables the experimental GTA: Vice City Stories (PS2) ISO patch workflow.
+- Assets/VC_PC/american.gxt, fronten2.txd and VCPR.adf are used by the GTA: Vice City classic PC tab. Place them in that folder before building.
+- GTA Vice City PS2 remains a blank, disabled Coming Soon tab. GTA San Andreas PC is enabled and uses Assets/SA_PC/TK, TrakLkup.dat, fronten1.txd and american.gxt.
+
+The mod payload files may be copyrighted or licensed separately from the GPL-licensed source code. Ensure that you have the necessary rights before distributing any payloads or compiled installer.
