@@ -28,7 +28,7 @@ if errorlevel 1 goto failed
 echo.
 echo Build complete: dist\GTA Vice City ^& Vice City Stories Hololive Radio Installer.exe
 echo The EXE includes the replacement audio payload and Hololive application icon.
-echo NOTE: This build currently supports GTA: Vice City PS2 only; Vice City Stories is not supported yet.
+echo NOTE: This build currently supports GTA: Vice City Stories PS2 only; Vice City is not supported yet.
 pause
 exit /b 0
 :failed
