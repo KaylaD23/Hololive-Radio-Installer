@@ -1,0 +1,4 @@
+VCPR.VB is required to run the patcher and build the self-contained Windows EXE.
+It is not included in this source-only archive because it is a large binary asset
+and its redistribution rights need separate consideration. Put an authorized
+VCPR.VB payload in this folder before running the program/build script.
