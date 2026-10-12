@@ -1,5 +1,5 @@
-# Hololive-Radio-Installer
-Hololive Radio Installer for GTA PS2 Games
+# Hololive Radio Installer
+Hololive Radio Installer for GTA
 
 Requires python to function
 
