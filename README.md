@@ -1,5 +1,4 @@
-# Hololive Radio Installer
-Hololive Radio Installer for GTA
+# Hololive Radio Installer for GTA
 
 Requires python to function
 
