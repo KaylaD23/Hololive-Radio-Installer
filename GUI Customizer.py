@@ -16,8 +16,8 @@ CONFIG_NAME = "gui_customization.json"
 DEFAULTS = {
     "window_title": "Grand Theft Auto Hololive Radio Installer",
     "header_text": "Grand Theft Auto Hololive Radio Installer",
-    "window_width": 840,
-    "window_height": 560,
+    "window_width": 965,
+    "window_height": 540,
     "theme": "Dark",
     "accent_color": "#7c3aed",
     "font_size": 10,
@@ -28,14 +28,15 @@ DEFAULTS = {
         "vc_pc": "GTA Vice City PC", "vc_ps2": "GTA Vice City PS2 [Coming Soon]", "sa_pc": "GTA San Andreas PC",
     },
 }
+# Keep this list in the same order as the main installer's tab strip.
 TAB_INFO = [
     ("vcs_ps2", "GTA Vice City Stories — PS2"),
-    ("sa_ps2", "GTA San Andreas — PS2"),
-    ("lcs_ps2", "GTA Liberty City Stories — PS2"),
     ("vcs_psp", "GTA Vice City Stories — PSP"),
+    ("lcs_ps2", "GTA Liberty City Stories — PS2"),
     ("lcs_psp", "GTA Liberty City Stories — PSP"),
+    ("vc_ps2", "GTA Vice City — PS2"),
     ("vc_pc", "GTA Vice City — PC"),
-    ("vc_ps2", "GTA Vice City — PS2 (Coming Soon; stays disabled)"),
+    ("sa_ps2", "GTA San Andreas — PS2"),
     ("sa_pc", "GTA San Andreas — PC"),
 ]
 

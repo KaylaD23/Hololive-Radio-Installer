@@ -2,8 +2,10 @@ Game mod payload files used by the installer:
 - Assets/VCS_PSP/VCPR.AT3, Assets/VCS_PSP/ENGLISH.GXT, and Assets/VCS_PSP/GAME.DTZ are all required local build inputs for GTA: Vice City Stories (PSP).
 - Assets/LCS_PSP/KJAH.AT3, Assets/LCS_PSP/ENGLISH.GXT, and Assets/LCS_PSP/GAME.DTZ are all required local build inputs for GTA: Liberty City Stories (PSP).
 - The build script verifies that each required PSP payload exists and is non-empty, then embeds it with its game-specific Assets subfolder path in the one-file EXE. Neither PSP tab includes payload file pickers.
-- VCPR.VB enables the experimental GTA: Vice City Stories (PS2) ISO patch workflow.
+- GTA VCS PS2 requires seven local files in Assets/VCS_PS2: AMERICAN.GXT, ENGLISH.GXT, FRENCH.GXT, GERMAN.GXT, SPANISH.GXT, VCPR.VB, and GAME.DTZ. These remain beside the app and are deliberately not embedded into the EXE.
 - Assets/VC_PC/american.gxt, fronten2.txd and VCPR.adf are used by the GTA: Vice City classic PC tab. Place them in that folder before building.
 - GTA Vice City PS2 remains a blank, disabled Coming Soon tab. GTA San Andreas PC is enabled and uses Assets/SA_PC/TK, TrakLkup.dat, fronten1.txd and american.gxt.
 
 The mod payload files may be copyrighted or licensed separately from the GPL-licensed source code. Ensure that you have the necessary rights before distributing any payloads or compiled installer.
+
+- GTA Vice City PC and San Andreas PC mod payloads are local build inputs and are not included in this ZIP. Use Assets/VC_PC/american.gxt, fronten2.txd, VCPR.adf and Assets/SA_PC/TK, TrakLkup.dat, fronten1.txd, american.gxt.

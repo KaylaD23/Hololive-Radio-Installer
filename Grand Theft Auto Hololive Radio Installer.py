@@ -38,8 +38,8 @@ CUSTOMIZATION_FILE = "gui_customization.json"
 DEFAULT_CUSTOMIZATION = {
     "window_title": APP_TITLE,
     "header_text": APP_TITLE,
-    "window_width": 840,
-    "window_height": 560,
+    "window_width": 965,
+    "window_height": 540,
     "theme": "Dark",
     "accent_color": "#7c3aed",
     "font_size": 10,
@@ -51,7 +51,7 @@ DEFAULT_CUSTOMIZATION = {
         "vcs_ps2": "GTA VCS PS2", "sa_ps2": "GTA San Andreas PS2", "lcs_ps2": "GTA LCS PS2",
         "vcs_psp": "GTA VCS PSP", "lcs_psp": "GTA LCS PSP",
         "vc_pc": "GTA Vice City PC",
-        "vc_ps2": "GTA Vice City PS2 [Coming Soon]",
+        "vc_ps2": "GTA Vice City PS2",
         "sa_pc": "GTA San Andreas PC",
     },
 }
@@ -492,6 +492,12 @@ VCS_PS2_TARGET_PATHS = {
     "VCPR.VB": "AUDIO/MUSIC/VCPR.VB",
     "GAME.DTZ": "PS2/GAME.DTZ",
 }
+VC_PS2_TARGET_PATHS = {
+    "AMERICAN.GXT": "TEXT/AMERICAN.GXT",
+    "VCPR.VB": "AUDIO/MUSIC/VCPR.VB",
+    "FRONTEN2.TXD": "MODELS/FRONTEN2.TXD",
+}
+
 
 
 # GTA: Liberty City Stories PS2 target paths and known retail disc serials.
@@ -555,6 +561,44 @@ def identify_vcs_ps2_iso(image: Iso9660) -> str:
     raise ValueError(
         f"Could not verify this as a supported GTA: Vice City Stories (PS2) ISO ({detected}). "
         "Only recognized GTA: San Andreas PS2 disc versions are accepted by this tab."
+    )
+
+
+def identify_vc_ps2_iso(image: Iso9660) -> str:
+    """Confirm the ISO's SYSTEM.CNF boot serial matches a known classic GTA: Vice City PS2 release."""
+    cnf_entries = [r for r in image.records if not r.directory and r.path.upper() == "SYSTEM.CNF"]
+    if len(cnf_entries) != 1:
+        raise ValueError(
+            "Could not uniquely identify the game's SYSTEM.CNF in the ISO. "
+            "This tab only supports GTA: Vice City (PS2) discs."
+        )
+    record = cnf_entries[0]
+    if record.file_unit_size or record.interleave_gap or (record.flags & 0x80):
+        raise ValueError("SYSTEM.CNF uses an unsupported ISO layout; refusing to guess the game identity.")
+    with open(image.path, "rb") as fh:
+        offset = record.data_extent * SECTOR_SIZE
+        if offset < 0 or offset + record.size > image.file_size or record.size > 1024 * 1024:
+            raise ValueError("SYSTEM.CNF has an invalid or unexpectedly large ISO directory entry.")
+        fh.seek(offset)
+        content = fh.read(record.size)
+    if len(content) != record.size:
+        raise ValueError("Could not read SYSTEM.CNF from the selected ISO.")
+    text = content.decode("ascii", errors="ignore").upper()
+    found = set()
+    for match in re.finditer(r"\b(SLUS|SLES|SLPM)[_-]?(\d{3})[._-]?(\d{2})\b", text):
+        found.add(f"{match.group(1)}-{match.group(2)}{match.group(3)}")
+    if found & VICE_CITY_PS2_SERIALS:
+        return sorted(found & VICE_CITY_PS2_SERIALS)[0]
+    if found & VICE_CITY_PS2_SERIALS:
+        serial = sorted(found & VICE_CITY_PS2_SERIALS)[0]
+        raise ValueError(
+            f"This ISO identifies as classic GTA: Vice City (PS2) ({serial}), which is not supported by this tab. "
+            "Select a GTA: Vice City (PS2) ISO instead."
+        )
+    detected = ", ".join(sorted(found)) if found else "no recognized PS2 serial"
+    raise ValueError(
+        f"Could not verify this as a supported GTA: Vice City (PS2) ISO ({detected}). "
+        "Only recognized classic GTA: Vice City PS2 disc versions are accepted by this tab."
     )
 
 
@@ -804,6 +848,103 @@ def _check_image_and_patch_iso(iso_path: Path, output_path: Path, payload_paths:
         f"  {VCS_PS2_TARGET_PATHS[name]}\n    {targets[name].size:,} → {resolved_payloads[name].stat().st_size:,} bytes" +
         (" (relocated to a new ISO extent)" if name in relocated_targets else "")
         for name in VCS_PS2_TARGET_PATHS
+    )
+    return (f"Patch completed.\n\nSource: {iso_path}\nPatched copy: {output_path}\nVerified disc: {game_serial}\n\n"
+            f"Files replaced:\n{details}\n\nThe source ISO was left unchanged. This patch is experimental and has not been verified in-game. Test the patched image in PCSX2 first.")
+
+
+def _check_vc_ps2_image_and_patch_iso(iso_path: Path, output_path: Path, payload_paths: dict[str, Path], status_callback=lambda s: None) -> str:
+    """Patch classic Vice City PS2 text, audio and model files into a copy."""
+    iso_path = Path(iso_path).expanduser()
+    output_path = Path(output_path).expanduser()
+    if not iso_path.is_file():
+        raise ValueError("Please choose an existing GTA: Vice City (PS2) ISO image.")
+    if iso_path.resolve() == output_path.resolve():
+        raise ValueError("The output path must differ from the source ISO. The source will never be overwritten.")
+    if output_path.exists():
+        raise FileExistsError(f"The output file already exists: {output_path}\nChoose a different output filename.")
+
+    resolved_payloads: dict[str, Path] = {}
+    for name in VC_PS2_TARGET_PATHS:
+        selected = payload_paths.get(name)
+        if selected is None:
+            raise ValueError(f"Required classic Vice City PS2 replacement '{name}' is missing. Put it in Assets/VC_PS2 beside the application.")
+        selected = Path(selected).expanduser().resolve()
+        if not selected.is_file():
+            raise ValueError(f"Replacement file '{name}' was not found: {selected}")
+        if selected.stat().st_size <= 0:
+            raise ValueError(f"Replacement file '{name}' is empty.")
+        if selected == iso_path.resolve():
+            raise ValueError(f"The ISO image itself cannot be used as the '{name}' replacement.")
+        resolved_payloads[name] = selected
+
+    status_callback("Checking classic Vice City PS2 ISO9660 structure…")
+    image = Iso9660(iso_path)
+    records = image.scan()
+    game_serial = identify_vc_ps2_iso(image)
+    status_callback(f"Verified GTA: Vice City (PS2) disc ({game_serial}).")
+    records_by_path: dict[str, list[Record]] = {}
+    for rec in records:
+        records_by_path.setdefault(rec.path.upper().rstrip(";1"), []).append(rec)
+
+    targets: dict[str, Record] = {}
+    for payload_name, target_path in VC_PS2_TARGET_PATHS.items():
+        matches = records_by_path.get(target_path.upper(), [])
+        if len(matches) != 1:
+            if not matches:
+                raise ValueError(f"Could not find required target '{target_path}' in this classic Vice City PS2 ISO.")
+            raise ValueError(f"More than one '{target_path}' entry was found; refusing an ambiguous patch.")
+        target = matches[0]
+        if target.directory:
+            raise ValueError(f"The target '{target_path}' is a directory, not a file.")
+        if target.file_unit_size or target.interleave_gap:
+            raise ValueError(f"The target '{target_path}' uses ISO interleaving, which this patcher does not support.")
+        if target.flags & 0x80:
+            raise ValueError(f"The target '{target_path}' is split across multiple ISO extents; this patcher will not modify it.")
+        if target.size <= 0 or target.end_sector > image.total_sectors:
+            raise ValueError(f"The target '{target_path}' has an invalid extent; refusing to patch it.")
+        targets[payload_name] = target
+
+    # Reject overlapping existing target allocations and collisions with any other ISO record.
+    for name, target in targets.items():
+        for other in records:
+            if other.record_offset == target.record_offset or other.sectors == 0:
+                continue
+            if other.data_extent < target.end_sector and target.data_extent < other.end_sector:
+                raise ValueError(f"ISO layout check failed: '{other.path}' overlaps '{VC_PS2_TARGET_PATHS[name]}'. No changes were made.")
+    intervals = sorted((rec.data_extent, rec.end_sector, name) for name, rec in targets.items())
+    for left, right in zip(intervals, intervals[1:]):
+        if left[1] > right[0]:
+            raise ValueError(f"The ISO has overlapping target extents ({left[2]} and {right[2]}). No changes were made.")
+
+    status_callback("Creating a patched classic Vice City PS2 ISO copy…")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    relocated_targets: set[str] = set()
+    next_free_sector = image.total_sectors
+    try:
+        shutil.copyfile(iso_path, output_path)
+        with open(output_path, "r+b") as out:
+            for index, payload_name in enumerate(VC_PS2_TARGET_PATHS, start=1):
+                target = targets[payload_name]
+                status_callback(f"Writing file {index}/{len(VC_PS2_TARGET_PATHS)}: {payload_name}…")
+                next_free_sector, relocated = _write_iso_replacement(out, target, resolved_payloads[payload_name], next_free_sector)
+                if relocated:
+                    relocated_targets.add(payload_name)
+                    status_callback(f"Relocated larger replacement {payload_name} to new ISO sectors…")
+            _update_iso_volume_space_size(out, next_free_sector)
+            out.flush()
+            os.fsync(out.fileno())
+    except Exception:
+        try:
+            output_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+    details = "\n".join(
+        f"  {VC_PS2_TARGET_PATHS[name]}\n    {targets[name].size:,} → {resolved_payloads[name].stat().st_size:,} bytes" +
+        (" (relocated to a new ISO extent)" if name in relocated_targets else "")
+        for name in VC_PS2_TARGET_PATHS
     )
     return (f"Patch completed.\n\nSource: {iso_path}\nPatched copy: {output_path}\nVerified disc: {game_serial}\n\n"
             f"Files replaced:\n{details}\n\nThe source ISO was left unchanged. This patch is experimental and has not been verified in-game. Test the patched image in PCSX2 first.")
@@ -1400,8 +1541,18 @@ def _run_with_cso_support(core, source_path: Path, output_path: Path, core_args:
         raise ValueError("The output path must differ from the source image. The source will never be overwritten.")
     if not source_path.is_file():
         raise ValueError("Please choose an existing ISO/CSO image.")
+    # Save As may target an existing ISO/CSO. Move it aside first so the core
+    # patchers (which intentionally refuse existing outputs) can run safely.
+    # Restore the old output if patching fails; never overwrite the source image.
+    output_backup: Path | None = None
     if output_path.exists():
-        raise FileExistsError(f"The output file already exists: {output_path}\nChoose a different output filename.")
+        if not output_path.is_file():
+            raise ValueError(f"The output path is not a regular file: {output_path}")
+        fd, backup_name = tempfile.mkstemp(prefix="hololive_output_backup_", suffix=output_path.suffix, dir=str(output_path.parent))
+        os.close(fd)
+        output_backup = Path(backup_name)
+        output_backup.unlink(missing_ok=True)
+        os.replace(output_path, output_backup)
 
     temporary_paths: list[Path] = []
     cso_output_version = _cso_version(source_path) if source_ext == ".cso" and output_ext == ".cso" else 1
@@ -1429,6 +1580,9 @@ def _run_with_cso_support(core, source_path: Path, output_path: Path, core_args:
         result = result.replace(str(source_iso), str(source_path)).replace(str(patched_iso), str(output_path))
         if output_ext == ".cso":
             result = result.replace("Patched ISO", "Patched CSO").replace("ISO copy", "CSO copy")
+        if output_backup is not None:
+            output_backup.unlink(missing_ok=True)
+            output_backup = None
         return result
     except Exception:
         if output_ext == ".cso":
@@ -1436,8 +1590,19 @@ def _run_with_cso_support(core, source_path: Path, output_path: Path, core_args:
                 output_path.unlink(missing_ok=True)
             except OSError:
                 pass
+        if output_backup is not None and output_backup.exists():
+            try:
+                output_path.unlink(missing_ok=True)
+                os.replace(output_backup, output_path)
+                output_backup = None
+            except OSError:
+                pass
         raise
     finally:
+        if output_backup is not None and output_backup.exists():
+            # If cleanup reached here after an unusual failure, retain the backup
+            # rather than deleting the user's previous ISO/CSO.
+            pass
         for temporary in temporary_paths:
             try:
                 temporary.unlink(missing_ok=True)
@@ -1459,6 +1624,10 @@ def check_psp_image_and_patch(iso_path: Path, output_path: Path, payload_paths: 
 
 def check_lcs_psp_image_and_patch(iso_path: Path, output_path: Path, payload_paths: dict[str, Path], status_callback=lambda s: None) -> str:
     return _run_with_cso_support(_check_lcs_psp_image_and_patch_iso, iso_path, output_path, (payload_paths,), status_callback)
+
+
+def check_vc_ps2_image_and_patch(iso_path: Path, output_path: Path, payload_paths: dict[str, Path], status_callback=lambda s: None) -> str:
+    return _run_with_cso_support(_check_vc_ps2_image_and_patch_iso, iso_path, output_path, (payload_paths,), status_callback)
 
 
 def check_lcs_ps2_image_and_patch(iso_path: Path, output_path: Path, payload_paths: dict[str, Path], status_callback=lambda s: None) -> str:
@@ -1717,6 +1886,10 @@ class App:
         self.iso_var = tk.StringVar()
         self.out_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Choose a GTA: Vice City Stories (PS2) ISO image to begin.")
+        self.vc_ps2_iso_var = tk.StringVar()
+        self.vc_ps2_out_var = tk.StringVar()
+        self.vc_ps2_status_var = tk.StringVar(value="Choose a GTA: Vice City (PS2) ISO image to begin.")
+        self.vc_ps2_events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.lcs_ps2_iso_var = tk.StringVar()
         self.lcs_ps2_out_var = tk.StringVar()
         self.lcs_ps2_status_var = tk.StringVar(value="Choose a GTA: Liberty City Stories (PS2) ISO image to begin.")
@@ -1743,6 +1916,7 @@ class App:
         self.root.after(100, self._poll_psp_events)
         self.root.after(100, self._poll_lcs_events)
         self.root.after(100, self._poll_lcs_ps2_events)
+        self.root.after(100, self._poll_vc_ps2_events)
         self.root.after(100, self._poll_sa_ps2_events)
 
     def _apply_visual_theme(self):
@@ -1795,21 +1969,23 @@ class App:
         pc_tab = ttk.Frame(notebook, padding=14)
         vc_ps2_tab = ttk.Frame(notebook, padding=14)
         sa_pc_tab = ttk.Frame(notebook, padding=14)
+        # Keep each game's platforms together in the tab strip: VCS, LCS,
+        # Vice City, then San Andreas.
         tabs = {
-            "vcs_ps2": ps2_tab, "sa_ps2": sa_ps2_tab, "lcs_ps2": lcs_ps2_tab,
-            "vcs_psp": vcs_psp_tab, "lcs_psp": lcs_psp_tab,
-            "vc_pc": pc_tab, "vc_ps2": vc_ps2_tab, "sa_pc": sa_pc_tab,
+            "vcs_ps2": ps2_tab, "vcs_psp": vcs_psp_tab,
+            "lcs_ps2": lcs_ps2_tab, "lcs_psp": lcs_psp_tab,
+            "vc_ps2": vc_ps2_tab, "vc_pc": pc_tab,
+            "sa_ps2": sa_ps2_tab, "sa_pc": sa_pc_tab,
         }
         for key, tab in tabs.items():
             notebook.add(tab, text=self.customization["tab_labels"].get(key, DEFAULT_CUSTOMIZATION["tab_labels"][key]))
-        # Classic Vice City PS2 remains disabled even if its tab is visible.
-        notebook.tab(vc_ps2_tab, state="disabled")
         for key, tab in tabs.items():
             if not self.customization["visible_tabs"].get(key, True):
                 notebook.tab(tab, state="hidden")
         self._build_ps2_tab(ps2_tab)
         self._build_sa_ps2_tab(sa_ps2_tab)
         self._build_lcs_ps2_tab(lcs_ps2_tab)
+        self._build_vc_ps2_tab(vc_ps2_tab)
         self._build_vcs_psp_tab(vcs_psp_tab)
         self._build_lcs_psp_tab(lcs_psp_tab)
         self._build_pc_tab(pc_tab)
@@ -1818,7 +1994,7 @@ class App:
     def _build_ps2_tab(self, parent):
         ttk.Label(
             parent,
-            text="Experimental ISO workflow for GTA: Vice City Stories (PS2). Classic GTA: Vice City (PS2) is not supported by this tab.",
+            text="GTA: Vice City (PS2). Replaces AMERICAN.GXT, VCPR.VB and FRONTEN2.TXD in a new ISO/CSO copy.",
             wraplength=690,
         ).pack(anchor="w", pady=(0, 12))
 
@@ -1937,8 +2113,11 @@ class App:
             messagebox.showwarning("Missing SA PS2 assets", "Put these local files in Assets\\SA_PS2 beside the application:\n\n" + "\n".join(missing), parent=self.root)
             return
         if out_path.exists():
-            messagebox.showwarning("Output already exists", "Choose a new output filename. Existing files will not be overwritten.", parent=self.root)
-            return
+            if not out_path.is_file():
+                messagebox.showerror("Invalid output", "The selected output exists but is not a file.", parent=self.root)
+                return
+            if not messagebox.askyesno("Overwrite existing output?", f"The output file already exists:\n\n{out_path}\n\nReplace it with the patched image?", parent=self.root):
+                return
         if not messagebox.askyesno(
             "Confirm experimental patch",
             "Create a new patched GTA: San Andreas (PS2) ISO/CSO?\n\nThe ISO's SYSTEM.CNF must identify a recognized San Andreas PS2 release and contain all four target paths. The original image will not be modified. This patch is experimental; test the result in PCSX2 first.",
@@ -1989,6 +2168,144 @@ class App:
             "All four files must be present. The source image is never overwritten; larger files may be relocated to new ISO sectors. Experimental: test in PCSX2 before use.",
             parent=self.root,
         )
+
+    def _build_vc_ps2_tab(self, parent):
+        """Build the VC PS2 patch tab using its three optional local payloads."""
+        ttk.Label(
+            parent,
+            text="GTA: Vice City (PS2). Replaces the bundled radio, text, and game-data files in a new ISO/CSO copy.",
+            wraplength=690,
+        ).pack(anchor="w", pady=(0, 12))
+
+        row1 = ttk.Frame(parent)
+        row1.pack(fill="x", pady=4)
+        ttk.Label(row1, text="Input ISO/CSO", width=14).pack(side="left")
+        ttk.Entry(row1, textvariable=self.vc_ps2_iso_var).pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Button(row1, text="Browse…", command=self._choose_vc_ps2_iso).pack(side="left")
+
+        row2 = ttk.Frame(parent)
+        row2.pack(fill="x", pady=4)
+        ttk.Label(row2, text="Output ISO/CSO", width=14).pack(side="left")
+        ttk.Entry(row2, textvariable=self.vc_ps2_out_var).pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Button(row2, text="Save as…", command=self._choose_vc_ps2_output).pack(side="left")
+
+        buttons = ttk.Frame(parent)
+        buttons.pack(fill="x", pady=(14, 8))
+        self.vc_ps2_patch_button = ttk.Button(
+            buttons, text="Create Patched PS2 ISO", command=self._start_vc_ps2_patch,
+        )
+        self.vc_ps2_patch_button.pack(side="left")
+        missing = [name for name in VC_PS2_TARGET_PATHS
+                   if not asset_path_in_game_folder(name, "VC_PS2").is_file()
+                   or asset_path_in_game_folder(name, "VC_PS2").stat().st_size <= 0]
+        if missing:
+            self.vc_ps2_patch_button.configure(state="disabled")
+            self.vc_ps2_status_var.set(
+                "Required VC PS2 assets are missing: " + ", ".join(missing)
+                + ". Put all three in Assets\\VC_PS2 and rebuild the EXE."
+            )
+        ttk.Button(buttons, text="About / Safety", command=self._about_vc_ps2).pack(side="left", padx=8)
+
+        self.vc_ps2_progress = ttk.Progressbar(parent, mode="indeterminate")
+        self.vc_ps2_progress.pack(fill="x", pady=(4, 8))
+        ttk.Label(parent, textvariable=self.vc_ps2_status_var, wraplength=690).pack(anchor="w")
+        ttk.Label(
+            parent,
+            text="Supports ISO/CSO v1 and experimental v2. Targets: AMERICAN.GXT → TEXT/AMERICAN.GXT; VCPR.VB → AUDIO/MUSIC/VCPR.VB; FRONTEN2.TXD → MODELS/FRONTEN2.TXD. Larger replacement files are relocated to new ISO sectors; the source image is never modified.",
+            foreground="#555555", wraplength=690,
+        ).pack(anchor="w", pady=(12, 0))
+
+    def _choose_vc_ps2_iso(self):
+        path = filedialog.askopenfilename(
+            title="Select GTA: Vice City (PS2) ISO",
+            filetypes=[("ISO/CSO disc images", "*.iso *.cso *.bin *.img"), ("All files", "*.*")],
+        )
+        if path:
+            self.vc_ps2_iso_var.set(path)
+            p = Path(path)
+            ext = ".cso" if p.suffix.casefold() == ".cso" else ".iso"
+            if not self.vc_ps2_out_var.get():
+                self.vc_ps2_out_var.set(str(p.with_name(p.stem + "_HOLOLIVE_RADIO_PATCHED" + ext)))
+            self.vc_ps2_status_var.set("Input image selected. Choose an output path and create the patched copy when all three Assets/VC_PS2 files are present.")
+
+    def _choose_vc_ps2_output(self):
+        initial = self.vc_ps2_out_var.get() or "VC_PS2_HOLOLIVE_RADIO_PATCHED.iso"
+        path = filedialog.asksaveasfilename(
+            title="Save patched ISO/CSO as", initialfile=Path(initial).name,
+            defaultextension=".iso", filetypes=[("ISO image", "*.iso"), ("CSO image", "*.cso"), ("All files", "*.*")],
+        )
+        if path:
+            self.vc_ps2_out_var.set(path)
+
+    def _start_vc_ps2_patch(self):
+        iso_text = self.vc_ps2_iso_var.get().strip()
+        out_text = self.vc_ps2_out_var.get().strip()
+        if not iso_text or not out_text:
+            messagebox.showwarning("Choose files", "Choose an input ISO/CSO and an output filename first.", parent=self.root)
+            return
+        iso_path = Path(iso_text).expanduser()
+        out_path = Path(out_text).expanduser()
+        payloads = {name: asset_path_in_game_folder(name, "VC_PS2") for name in VC_PS2_TARGET_PATHS}
+        missing = [name for name, path in payloads.items() if not path.is_file() or path.stat().st_size <= 0]
+        if missing:
+            messagebox.showwarning("Missing VC PS2 assets", "Add these files to Assets/VC_PS2 and rebuild the EXE:\n\n" + "\n".join(missing), parent=self.root)
+            return
+        if out_path.exists():
+            if not out_path.is_file():
+                messagebox.showerror("Invalid output", "The selected output exists but is not a file.", parent=self.root)
+                return
+            if not messagebox.askyesno("Overwrite existing output?", f"The output file already exists:\n\n{out_path}\n\nReplace it with the patched image?", parent=self.root):
+                return
+        if not messagebox.askyesno(
+            "Confirm experimental patch",
+            "Create a new patched GTA: Vice City (PS2) ISO/CSO?\n\nThe input must identify as a recognized VC PS2 release and contain all three target paths. The original image will not be modified. Larger replacement files may be relocated to new ISO sectors. This patch is experimental and has not been verified in-game.",
+            parent=self.root,
+        ):
+            return
+        self.vc_ps2_patch_button.configure(state="disabled")
+        self.vc_ps2_progress.start(12)
+        self.vc_ps2_status_var.set("Starting VC PS2 ISO check…")
+        def status(msg: str):
+            self.vc_ps2_events.put(("status", msg))
+        def worker():
+            try:
+                result = check_vc_ps2_image_and_patch(iso_path, out_path, payloads, status)
+            except Exception as exc:
+                self.vc_ps2_events.put(("error", f"{exc}\n\n{traceback.format_exc()}"))
+            else:
+                self.vc_ps2_events.put(("done", result))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _poll_vc_ps2_events(self):
+        try:
+            while True:
+                kind, value = self.vc_ps2_events.get_nowait()
+                if kind == "status":
+                    self.vc_ps2_status_var.set(str(value))
+                else:
+                    self.vc_ps2_progress.stop()
+                    self.vc_ps2_patch_button.configure(state="normal")
+                    if kind == "done":
+                        self.vc_ps2_status_var.set("VC PS2 ISO patch completed successfully.")
+                        messagebox.showinfo("VC PS2 patch complete", str(value), parent=self.root)
+                    else:
+                        self.vc_ps2_status_var.set("VC PS2 patch stopped; no completed output was kept.")
+                        messagebox.showerror("Could not patch VC PS2 ISO", str(value), parent=self.root)
+        except queue.Empty:
+            pass
+        self.root.after(100, self._poll_vc_ps2_events)
+
+    def _about_vc_ps2(self):
+        messagebox.showinfo(
+            "GTA Vice City PS2 / Safety",
+            "The VC PS2 tab verifies SYSTEM.CNF against recognized VC PS2 serials, then replaces these optional bundled files:\n\n"
+            "• Assets\\VC_PS2\\KJAH.VB → AUDIO/MUSIC/KJAH.VB\n"
+            "• Assets\\VC_PS2\\ENGLISH.GXT → TEXT/ENGLISH.GXT\n"
+            "• Assets\\VC_PS2\\GAME.DTZ → CHK/PS2/GAME.DTZ\n\n"
+            "All three files must be present to enable patching. The app creates a new ISO/CSO and never overwrites the source. Larger replacement files are relocated to new ISO sectors and directory entries are updated. This patch is experimental and has not been verified in-game; test in PCSX2 first.",
+            parent=self.root,
+        )
+
 
     def _build_lcs_ps2_tab(self, parent):
         """Build the LCS PS2 patch tab using its three optional local payloads."""
@@ -2072,8 +2389,11 @@ class App:
             messagebox.showwarning("Missing LCS PS2 assets", "Add these files to Assets/LCS_PS2 and rebuild the EXE:\n\n" + "\n".join(missing), parent=self.root)
             return
         if out_path.exists():
-            messagebox.showwarning("Output already exists", "Choose a new output filename. Existing files will not be overwritten.", parent=self.root)
-            return
+            if not out_path.is_file():
+                messagebox.showerror("Invalid output", "The selected output exists but is not a file.", parent=self.root)
+                return
+            if not messagebox.askyesno("Overwrite existing output?", f"The output file already exists:\n\n{out_path}\n\nReplace it with the patched image?", parent=self.root):
+                return
         if not messagebox.askyesno(
             "Confirm experimental patch",
             "Create a new patched GTA: Liberty City Stories (PS2) ISO/CSO?\n\nThe input must identify as a recognized LCS PS2 release and contain all three target paths. The original image will not be modified. Larger replacement files may be relocated to new ISO sectors. This patch is experimental and has not been verified in-game.",
@@ -2357,8 +2677,11 @@ class App:
         iso_path = Path(iso_text).expanduser()
         out_path = Path(out_text).expanduser()
         if out_path.exists():
-            messagebox.showwarning("Output already exists", "Choose a new output filename. Existing files will not be overwritten.")
-            return
+            if not out_path.is_file():
+                messagebox.showerror("Invalid output", "The selected output exists but is not a file.")
+                return
+            if not messagebox.askyesno("Overwrite existing output?", f"The output file already exists:\n\n{out_path}\n\nReplace it with the patched image?"):
+                return
         try:
             for name, path in payloads.items():
                 if not path.is_file() or path.stat().st_size <= 0:
@@ -2463,8 +2786,11 @@ class App:
         iso_path = Path(iso_text).expanduser()
         out_path = Path(out_text).expanduser()
         if out_path.exists():
-            messagebox.showwarning("Output already exists", "Choose a new output filename. Existing files will not be overwritten.")
-            return
+            if not out_path.is_file():
+                messagebox.showerror("Invalid output", "The selected output exists but is not a file.")
+                return
+            if not messagebox.askyesno("Overwrite existing output?", f"The output file already exists:\n\n{out_path}\n\nReplace it with the patched image?"):
+                return
         if not messagebox.askyesno(
             "Confirm experimental LCS PSP patch",
             "Create a new patched GTA: Liberty City Stories (PSP) ISO/CSO?\n\n"
@@ -2621,8 +2947,11 @@ class App:
             )
             return
         if out_path.exists():
-            messagebox.showwarning("Output already exists", "Choose a new output filename. Existing files will not be overwritten.")
-            return
+            if not out_path.is_file():
+                messagebox.showerror("Invalid output", "The selected output exists but is not a file.")
+                return
+            if not messagebox.askyesno("Overwrite existing output?", f"The output file already exists:\n\n{out_path}\n\nReplace it with the patched image?"):
+                return
         if not messagebox.askyesno(
             "Confirm experimental patch",
             "Create a new patched GTA: Vice City Stories (PS2) ISO/CSO?\n\nThe ISO's SYSTEM.CNF must identify a supported VCS PS2 release. Classic GTA: Vice City (PS2) is not supported.\n\nSeven local files will be replaced using Assets/VCS_PS2. The original image will not be modified. This patch is experimental and has not been verified in-game.",

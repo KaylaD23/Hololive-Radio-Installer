@@ -77,22 +77,28 @@ def main() -> int:
             args.extend(["--add-data", f"{legacy_path};Assets/VC_PC"])
             included.append(f"{filename} -> Assets/VC_PC (legacy root-level file)")
 
-    # Bundle the entire Assets directory as one recursive data tree. This
-    # explicitly includes PSP, PC, PS2, and future game payload folders in
-    # PyInstaller's one-file EXE while preserving Assets/<game>/<filename>.
+    # Add every file under Assets individually. This makes the bundle manifest
+    # explicit and preserves each file's exact Assets/<subfolder>/... path in
+    # PyInstaller's one-file EXE, including newly added and deeply nested folders.
+    # Empty directories cannot be represented in PyInstaller data; folders with
+    # README placeholders are retained because those files are bundled too.
     assets_root = base / "Assets"
     asset_files = sorted(p for p in assets_root.rglob("*") if p.is_file()) if assets_root.is_dir() else []
-    if assets_root.is_dir() and asset_files:
-        args.extend(["--add-data", f"{assets_root};Assets"])
-        included.extend(p.relative_to(base).as_posix() for p in asset_files)
+    asset_dirs = sorted(p for p in assets_root.rglob("*") if p.is_dir()) if assets_root.is_dir() else []
+    for path in asset_files:
+        destination = path.parent.relative_to(base).as_posix()
+        args.extend(["--add-data", f"{path};{destination}"])
+        included.append(path.relative_to(base).as_posix())
 
     args.append(str(base / SCRIPT_NAME))
 
 
     asset_file_count = len(asset_files)
     print("Embedding files: " + (", ".join(included) if included else "no optional payload assets found"))
-    print(f"Assets bundled from Assets/: {asset_file_count} file(s). The complete Assets directory is added recursively to the EXE.")
-    print("Bundled asset platforms: PSP (VCS_PSP, LCS_PSP), PC (VC_PC, SA_PC), and PS2 (VCS_PS2, LCS_PS2, SA_PS2), plus any other files under Assets/.")
+    print(f"Assets bundled from Assets/: {asset_file_count} file(s) across {len(asset_dirs)} folder(s). Every file is added individually with its relative folder path preserved.")
+    for folder in sorted({p.parent.relative_to(assets_root).as_posix() for p in asset_files}):
+        print("  Assets/" + (folder if folder != "." else "") + (" (root)" if folder == "." else ""))
+    print("Bundled asset platforms: PSP (VCS_PSP, LCS_PSP), PC (VC_PC, SA_PC), and PS2 (VCS_PS2, VC_PS2, LCS_PS2, SA_PS2), plus any other files under Assets/.")
     print("Assets are optional at build time. Every file present under Assets/ is embedded into the EXE. Missing game payloads disable only their corresponding install/patch action.")
     print("Both PC tabs show only the game install-folder selector and Install PC Files button; payload file pickers are not displayed.")
     print("GTA VCS PS2 assets are bundled from Assets/VCS_PS2 when present.")
@@ -104,7 +110,10 @@ def main() -> int:
     sa_missing = [name for name in sa_local if not (base / "Assets" / "SA_PS2" / name).is_file() or (base / "Assets" / "SA_PS2" / name).stat().st_size <= 0]
     print("  SA_PS2 local files: " + ("all four found" if not sa_missing else "missing/empty: " + ", ".join(sa_missing)))
     print("GTA LCS PS2 patching uses optional Assets/LCS_PS2 payloads: KJAH.VB, ENGLISH.GXT, and GAME.DTZ.")
-    print("GTA Vice City PS2 tab is disabled as Coming Soon; classic Vice City PS2 ISO patching is not implemented.")
+    print("GTA Vice City PS2 patching uses optional Assets/VC_PS2 payloads: AMERICAN.GXT, VCPR.VB, and FRONTEN2.TXD.")
+    vc_local = ("AMERICAN.GXT", "VCPR.VB", "FRONTEN2.TXD")
+    vc_missing = [name for name in vc_local if not (base / "Assets" / "VC_PS2" / name).is_file() or (base / "Assets" / "VC_PS2" / name).stat().st_size <= 0]
+    print("  VC_PS2 local files: " + ("all three found" if not vc_missing else "missing/empty: " + ", ".join(vc_missing)))
     print("All files in every Assets subfolder are bundled into the one-file EXE when present; no game asset folder is excluded.")
     print("GTA San Andreas PC installation is available when its optional payload set is included.")
     run(args)
