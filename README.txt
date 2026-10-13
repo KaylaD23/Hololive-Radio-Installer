@@ -156,3 +156,8 @@ Place `KJAH.VB`, `ENGLISH.GXT`, and `GAME.DTZ` in `Assets/LCS_PS2`. These map to
 
 Asset path troubleshooting (updated):
 For VCS PS2 and San Andreas PS2, the app now searches Assets/<game folder> beside the running app, one folder above the app (useful when the EXE is in dist/), beside the source script, one folder above the source script, and the current working directory. The folder must be named exactly Assets\SA_PS2 or Assets\VCS_PS2, with the expected filenames. Restart the installer after moving files.
+
+
+Overwrite existing output images
+--------------------------------
+All ISO/CSO patch tabs now allow an existing output image to be replaced after an explicit confirmation. The selected input image is still protected and can never be the output destination. Before patching, an existing output is moved to a temporary backup; a successful patch replaces it, while a failed patch restores the previous output.

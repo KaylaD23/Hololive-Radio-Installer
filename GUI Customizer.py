@@ -21,11 +21,11 @@ DEFAULTS = {
     "theme": "Dark",
     "accent_color": "#7c3aed",
     "font_size": 10,
-    "visible_tabs": {"vcs_ps2": True, "sa_ps2": True, "lcs_ps2": True, "vcs_psp": True, "lcs_psp": True, "vc_pc": True, "vc_ps2": True, "sa_pc": True},
+    "visible_tabs": {"vcs_ps2": True, "sa_ps2": True, "lcs_ps2": True, "vcs_psp": True, "lcs_psp": True, "vc_pc": True, "vc_ps2": True, "iii_ps2": True, "sa_pc": True},
     "tab_labels": {
         "vcs_ps2": "GTA VCS PS2", "sa_ps2": "GTA San Andreas PS2", "lcs_ps2": "GTA LCS PS2",
         "vcs_psp": "GTA VCS PSP", "lcs_psp": "GTA LCS PSP",
-        "vc_pc": "GTA Vice City PC", "vc_ps2": "GTA Vice City PS2 [Coming Soon]", "sa_pc": "GTA San Andreas PC",
+        "vc_pc": "GTA Vice City PC", "vc_ps2": "GTA Vice City PS2", "iii_ps2": "GTA III PS2", "sa_pc": "GTA San Andreas PC",
     },
 }
 # Keep this list in the same order as the main installer's tab strip.
@@ -36,6 +36,7 @@ TAB_INFO = [
     ("lcs_psp", "GTA Liberty City Stories — PSP"),
     ("vc_ps2", "GTA Vice City — PS2"),
     ("vc_pc", "GTA Vice City — PC"),
+    ("iii_ps2", "GTA III — PS2"),
     ("sa_ps2", "GTA San Andreas — PS2"),
     ("sa_pc", "GTA San Andreas — PC"),
 ]

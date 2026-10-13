@@ -17,7 +17,7 @@ DATA_FILES = (
 
 def main() -> int:
     base = Path(__file__).resolve().parent
-    required = [base / SCRIPT_NAME, base / "hololive_radio_icon.ico"]
+    required = [base / SCRIPT_NAME]
     missing = [str(p.name) for p in required if not p.is_file()]
     if missing:
         print("Missing required project files: " + ", ".join(missing), file=sys.stderr)
@@ -57,10 +57,14 @@ def main() -> int:
 
     args = [
         "--clean", "--noconfirm", "--onefile", "--windowed",
-        "--name", APP_NAME, "--icon", str(base / "hololive_radio_icon.ico"),
+        "--name", APP_NAME,
         "--distpath", str(dist_path), "--workpath", str(work_path),
         "--specpath", str(spec_path),
     ]
+    icon_path = base / "hololive_radio_icon.ico"
+    if icon_path.is_file():
+        args.extend(["--icon", str(icon_path)])
+
     included = []
     for filename in DATA_FILES:
         path = base / filename

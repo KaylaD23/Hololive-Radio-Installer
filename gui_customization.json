@@ -1,7 +1,7 @@
 {
   "window_title": "Grand Theft Auto Hololive Radio Installer",
   "header_text": "Grand Theft Auto Hololive Radio Installer",
-  "window_width": 965,
+  "window_width": 1050,
   "window_height": 540,
   "theme": "Dark",
   "accent_color": "#6415e8",
@@ -13,6 +13,7 @@
     "lcs_psp": true,
     "vc_ps2": true,
     "vc_pc": true,
+    "iii_ps2": true,
     "sa_ps2": true,
     "sa_pc": true
   },
@@ -24,6 +25,7 @@
     "lcs_psp": "GTA LCS PSP",
     "vc_pc": "GTA Vice City PC",
     "vc_ps2": "GTA Vice City PS2",
+    "iii_ps2": "GTA III PS2",
     "sa_pc": "GTA San Andreas PC"
   }
 }
