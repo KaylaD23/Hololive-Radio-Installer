@@ -1,11 +1,15 @@
-Game mod payload files used by the installer:
-- Assets/VCS_PSP/VCPR.AT3, Assets/VCS_PSP/ENGLISH.GXT, and Assets/VCS_PSP/GAME.DTZ are all required local build inputs for GTA: Vice City Stories (PSP).
-- Assets/LCS_PSP/KJAH.AT3, Assets/LCS_PSP/ENGLISH.GXT, and Assets/LCS_PSP/GAME.DTZ are all required local build inputs for GTA: Liberty City Stories (PSP).
-- The build script verifies that each required PSP payload exists and is non-empty, then embeds it with its game-specific Assets subfolder path in the one-file EXE. Neither PSP tab includes payload file pickers.
-- GTA VCS PS2 requires seven local files in Assets/VCS_PS2: AMERICAN.GXT, ENGLISH.GXT, FRENCH.GXT, GERMAN.GXT, SPANISH.GXT, VCPR.VB, and GAME.DTZ. These remain beside the app and are deliberately not embedded into the EXE.
-- Assets/VC_PC/american.gxt, fronten2.txd and VCPR.adf are used by the GTA: Vice City classic PC tab. Place them in that folder before building.
-- GTA Vice City PS2 remains a blank, disabled Coming Soon tab. GTA San Andreas PC is enabled and uses Assets/SA_PC/TK, TrakLkup.dat, fronten1.txd and american.gxt.
+Game payload bundling notice
 
-The mod payload files may be copyrighted or licensed separately from the GPL-licensed source code. Ensure that you have the necessary rights before distributing any payloads or compiled installer.
+All available game payloads belong in the game-specific folders under Assets/ (for example, Assets/VCS_PS2 or Assets/SA_PC). The Windows build script embeds every file found under Assets/ into the one-file EXE with its folder path preserved. Files with the same name are kept separate by game folder; the installer only loads a payload from the folder for the selected game.
 
-- GTA Vice City PC and San Andreas PC mod payloads are local build inputs and are not included in this ZIP. Use Assets/VC_PC/american.gxt, fronten2.txd, VCPR.adf and Assets/SA_PC/TK, TrakLkup.dat, fronten1.txd, american.gxt.
+The asset folders in this project may be incomplete. Every payload required by a specific game workflow must be present and non-empty before building to enable that action. The build process does not create or infer missing payloads.
+
+Game data, mods, UI artwork, Hololive materials, GTA trademarks, and audio may be subject to rights separate from the GPL-licensed source code. Distribute only content you are authorized to redistribute.
+GTA III PS2: AMERICAN.GXT and FRONTEND.TXD are provided under Assets/III_PS2. KJAH.VB must be supplied locally in Assets/III_PS2; the EXE build script bundles it automatically when present.
+
+
+Definitive Edition payloads (optional, supplied separately):
+- Assets/VC_DE/500-HololiveRadio_P.pak -> GTA San Andreas - The Definitive Edition/Gameface/Content/Paks/~mods/500-HololiveRadio_P.pak
+- Assets/SA_DE/500-HololiveRadio_P.pak -> GTA Vice City - The Definitive Edition/Gameface/Content/Paks/~mods/500-HololiveRadio_P.pak
+
+The build script recursively bundles all files present under Assets/. The supplied archive does not contain either .pak file; place your licensed payloads in the specified folders before rebuilding.

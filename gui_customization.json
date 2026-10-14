@@ -1,23 +1,43 @@
 {
   "window_title": "Grand Theft Auto Hololive Radio Installer",
   "header_text": "Grand Theft Auto Hololive Radio Installer",
-  "window_width": 1050,
-  "window_height": 540,
+  "window_width": 1295,
+  "window_height": 800,
   "theme": "Dark",
-  "accent_color": "#6415e8",
+  "accent_color": "#00b8f4",
   "font_size": 10,
+  "banner_enabled": true,
+  "banner_custom_image": "",
+  "banner_fit_mode": "proportional",
+  "banner_fixed_height": 160,
   "visible_tabs": {
+    "gta3_ps2": true,
     "vcs_ps2": true,
     "vcs_psp": true,
     "lcs_ps2": true,
     "lcs_psp": true,
     "vc_ps2": true,
     "vc_pc": true,
-    "iii_ps2": true,
     "sa_ps2": true,
-    "sa_pc": true
+    "sa_pc": true,
+    "vc_de": true,
+    "sa_de": true
   },
+  "tab_order": [
+    "gta3_ps2",
+    "vc_ps2",
+    "sa_ps2",
+    "lcs_ps2",
+    "vcs_ps2",
+    "lcs_psp",
+    "vcs_psp",
+    "vc_pc",
+    "sa_pc",
+    "vc_de",
+    "sa_de"
+  ],
   "tab_labels": {
+    "gta3_ps2": "GTA III PS2",
     "vcs_ps2": "GTA VCS PS2",
     "sa_ps2": "GTA San Andreas PS2",
     "lcs_ps2": "GTA LCS PS2",
@@ -25,7 +45,8 @@
     "lcs_psp": "GTA LCS PSP",
     "vc_pc": "GTA Vice City PC",
     "vc_ps2": "GTA Vice City PS2",
-    "iii_ps2": "GTA III PS2",
-    "sa_pc": "GTA San Andreas PC"
+    "sa_pc": "GTA San Andreas PC",
+    "vc_de": "GTA Vice City - Definitive Edition",
+    "sa_de": "GTA San Andreas - Definitive Edition"
   }
 }

@@ -5,9 +5,8 @@
 # under the terms of the GNU General Public License version 3. See LICENSE.
 """Grand Theft Auto Hololive Radio Installer.
 
-Includes bundled-asset PC installers for GTA: Vice City and GTA: San Andreas,
-plus experimental GTA: Vice City Stories PS2/PSP and GTA: Liberty City Stories PSP/PS2
-ISO patchers.
+Includes bundled-asset installers for classic GTA: Vice City/San Andreas PC and optional Definitive Edition .pak installs,
+plus experimental GTA III, GTA: Vice City Stories, GTA: Liberty City Stories, and other supported PS2/PSP ISO patchers.
 PC mod files are loaded from Assets/<game> and installed with backups and rollback.
 ISO/CSO patchers create new images, supporting ISO9660 images and standard block-compressed CSO files.
 """
@@ -30,6 +29,15 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+# Pillow is used to resize the wide banner to the actual window width while
+# preserving its aspect ratio. The build script installs Pillow for EXE builds.
+try:
+    from PIL import Image, ImageTk, ImageOps
+except ImportError:  # Keep source startup possible on minimal Python installs.
+    Image = None
+    ImageTk = None
+    ImageOps = None
+
 SECTOR_SIZE = 2048
 PVD_FIRST_SECTOR = 16
 MAX_DIRECTORY_DEPTH = 64
@@ -38,23 +46,49 @@ CUSTOMIZATION_FILE = "gui_customization.json"
 DEFAULT_CUSTOMIZATION = {
     "window_title": APP_TITLE,
     "header_text": APP_TITLE,
-    "window_width": 1050,
+    "window_width": 965,
     "window_height": 540,
-    "theme": "Dark",
-    "accent_color": "#7c3aed",
+    "theme": "Light",
+    "accent_color": "#00b8f4",
     "font_size": 10,
+    "banner_enabled": True,
+    "banner_custom_image": "",
+    "banner_fit_mode": "proportional",
+    "banner_fixed_height": 120,
     "visible_tabs": {
-        "vcs_ps2": True, "sa_ps2": True, "lcs_ps2": True, "vcs_psp": True, "lcs_psp": True,
-        "vc_pc": True, "vc_ps2": True, "iii_ps2": True, "sa_pc": True,
+        "gta3_ps2": True, "vcs_ps2": True, "sa_ps2": True, "lcs_ps2": True, "vcs_psp": True, "lcs_psp": True,
+        "vc_pc": True, "vc_ps2": True, "sa_pc": True,
+        "vc_de": True, "sa_de": True,
     },
+    "tab_order": ["gta3_ps2", "vcs_ps2", "vcs_psp", "lcs_ps2", "lcs_psp", "vc_ps2", "vc_pc", "sa_ps2", "sa_pc", "vc_de", "sa_de"],
     "tab_labels": {
+        "gta3_ps2": "GTA III PS2",
         "vcs_ps2": "GTA VCS PS2", "sa_ps2": "GTA San Andreas PS2", "lcs_ps2": "GTA LCS PS2",
         "vcs_psp": "GTA VCS PSP", "lcs_psp": "GTA LCS PSP",
         "vc_pc": "GTA Vice City PC",
-        "vc_ps2": "GTA Vice City PS2", "iii_ps2": "GTA III PS2",
+        "vc_ps2": "GTA Vice City PS2",
         "sa_pc": "GTA San Andreas PC",
+        "vc_de": "GTA Vice City - The Definitive Edition",
+        "sa_de": "GTA San Andreas - The Definitive Edition",
     },
 }
+
+# The folder names intentionally follow the supplied project's asset naming:
+# VC_DE payload installs into San Andreas Definitive Edition; SA_DE payload
+# installs into Vice City Definitive Edition, exactly as requested.
+DE_INSTALL_TARGETS = {
+    "sa_de": {
+        "display": "GTA San Andreas - The Definitive Edition",
+        "asset_folder": "VC_DE",
+        "relative_path": Path("Gameface") / "Content" / "Paks" / "~mods" / "500-HololiveRadio_P.pak",
+    },
+    "vc_de": {
+        "display": "GTA Vice City - The Definitive Edition",
+        "asset_folder": "SA_DE",
+        "relative_path": Path("Gameface") / "Content" / "Paks" / "~mods" / "500-HololiveRadio_P.pak",
+    },
+}
+DE_PAK_FILENAME = "500-HololiveRadio_P.pak"
 
 
 def load_customization() -> dict:
@@ -67,9 +101,26 @@ def load_customization() -> dict:
             for key in ("window_title", "header_text", "theme", "accent_color"):
                 if isinstance(user_config.get(key), str):
                     config[key] = user_config[key]
-            for key in ("window_width", "window_height", "font_size"):
+            for key in ("window_width", "window_height", "font_size", "banner_fixed_height"):
                 if isinstance(user_config.get(key), int):
                     config[key] = user_config[key]
+            if isinstance(user_config.get("banner_enabled"), bool):
+                config["banner_enabled"] = user_config["banner_enabled"]
+            if isinstance(user_config.get("banner_custom_image"), str):
+                # GUI Customizer stores a local filename beside the application.
+                custom_name = user_config["banner_custom_image"].strip()
+                if custom_name and Path(custom_name).name == custom_name:
+                    config["banner_custom_image"] = custom_name
+            if user_config.get("banner_fit_mode") in ("proportional", "crop"):
+                config["banner_fit_mode"] = user_config["banner_fit_mode"]
+            allowed_tab_keys = list(DEFAULT_CUSTOMIZATION["visible_tabs"])
+            saved_order = user_config.get("tab_order")
+            if isinstance(saved_order, list):
+                cleaned_order = []
+                for item in saved_order:
+                    if isinstance(item, str) and item in allowed_tab_keys and item not in cleaned_order:
+                        cleaned_order.append(item)
+                config["tab_order"] = cleaned_order + [key for key in DEFAULT_CUSTOMIZATION["tab_order"] if key not in cleaned_order]
             for key in DEFAULT_CUSTOMIZATION["visible_tabs"]:
                 value = user_config.get("visible_tabs", {}).get(key)
                 if isinstance(value, bool):
@@ -83,6 +134,7 @@ def load_customization() -> dict:
     config["window_width"] = max(650, min(1600, config["window_width"]))
     config["window_height"] = max(450, min(1200, config["window_height"]))
     config["font_size"] = max(8, min(18, config["font_size"]))
+    config["banner_fixed_height"] = max(60, min(260, config["banner_fixed_height"]))
     if config["theme"] not in ("Default", "Light", "Dark"):
         config["theme"] = "Default"
     if not re.fullmatch(r"#[0-9a-fA-F]{6}", config["accent_color"]):
@@ -95,80 +147,38 @@ def app_folder() -> Path:
     return Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 
 
-def local_game_asset_path(name: str, game_folder: str) -> Path:
-    """Find local assets next to the EXE, source project, or working directory.
-
-    Check external development folders first, then PyInstaller's extraction
-    directory so payloads embedded in a one-file EXE can be found at runtime.
-    Folder and filename matching is case-insensitive as a fallback.
-    """
-    app_dir = app_folder()
-    script_dir = Path(__file__).resolve().parent
-    bundle_dir = Path(getattr(sys, "_MEIPASS", script_dir))
-    roots = [app_dir, app_dir.parent, script_dir, script_dir.parent, bundle_dir, Path.cwd()]
-    seen = set()
-    candidates = []
-    for root in roots:
-        try:
-            root = root.resolve()
-        except OSError:
-            continue
-        if root in seen:
-            continue
-        seen.add(root)
-        assets_root = root / "Assets"
-        folder_path = assets_root / game_folder
-        candidate = folder_path / name
-        candidates.append(candidate)
-        if candidate.is_file() and candidate.stat().st_size > 0:
-            return candidate
-        # Case-insensitive fallback for folder and filename spelling.
-        try:
-            actual_assets = next((x for x in root.iterdir() if x.is_dir() and x.name.casefold() == "assets"), None)
-            actual_game = next((x for x in actual_assets.iterdir() if x.is_dir() and x.name.casefold() == game_folder.casefold()), None) if actual_assets else None
-            actual_file = next((x for x in actual_game.iterdir() if x.is_file() and x.name.casefold() == name.casefold() and x.stat().st_size > 0), None) if actual_game else None
-            if actual_file is not None:
-                return actual_file
-        except (OSError, StopIteration):
-            pass
-    return candidates[0] if candidates else app_dir / "Assets" / game_folder / name
+def _case_insensitive_child(parent: Path, name: str) -> Path:
+    """Resolve a bundled child path even if a payload's filename casing differs."""
+    candidate = parent / name
+    if candidate.exists():
+        return candidate
+    try:
+        wanted = name.casefold()
+        for child in parent.iterdir():
+            if child.name.casefold() == wanted:
+                return child
+    except OSError:
+        pass
+    return candidate
 
 
 def asset_path(name: str) -> Path:
-    """Locate bundled assets, preserving compatibility with older project files."""
+    """Resolve app-level resources (icon/banner) from the source or EXE bundle."""
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    game_folders = {
-        "VCPR.VB": ("Assets", "VCS_PS2"),
-        "american.gxt": ("Assets", "VC_PC"),
-        "fronten2.txd": ("Assets", "VC_PC"),
-        "VCPR.adf": ("Assets", "VC_PC"),
-        "VCPR.AT3": ("Assets", "VCS_PSP"),
-        "ENGLISH.GXT": ("Assets", "VCS_PSP"),
-        "GAME.DTZ": ("Assets", "VCS_PSP"),
-    }
-    if name in game_folders:
-        candidate = base.joinpath(*game_folders[name], name)
-        if candidate.is_file():
-            return candidate
-    # Legacy root-level assets and app resources (icon, etc.) remain supported.
-    return base / name
+    return _case_insensitive_child(base, name)
 
 
 def asset_path_in_game_folder(name: str, game_folder: str) -> Path:
-    """Resolve a payload from its game-specific Assets folder.
+    """Resolve a payload only from its own Assets/<game> directory.
 
-    Legacy root-level files are accepted only for Vice City PC, whose earlier
-    builds placed these three payloads beside the build script. PSP and San
-    Andreas assets never fall back across game folders because filenames may
-    match while the contents are not interchangeable.
+    PyInstaller preserves this folder hierarchy in the one-file bundle. No loose
+    file or cross-game fallback is used, so duplicate filenames such as
+    AMERICAN.GXT always come from the selected game's own payload directory.
     """
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    candidate = base / "Assets" / game_folder / name
-    if candidate.is_file():
-        return candidate
-    if game_folder == "VC_PC" and (base / name).is_file():
-        return base / name
-    return candidate
+    assets_root = _case_insensitive_child(base, "Assets")
+    game_root = _case_insensitive_child(assets_root, game_folder)
+    return _case_insensitive_child(game_root, name)
 
 
 def read_be32(data: bytes) -> int:
@@ -478,11 +488,15 @@ LCS_PSP_SERIALS = {
 LCS_PSP_TARGET_PATHS = {
     "KJAH.AT3": "PSP_GAME/USRDIR/AUDIO/MUSIC/KJAH.AT3",
     "ENGLISH.GXT": "PSP_GAME/USRDIR/TEXT/ENGLISH.GXT",
+    "SPANISH.GXT": "PSP_GAME/USRDIR/TEXT/SPANISH.GXT",
+    "FRENCH.GXT": "PSP_GAME/USRDIR/TEXT/FRENCH.GXT",
+    "GERMAN.GXT": "PSP_GAME/USRDIR/TEXT/GERMAN.GXT",
+    "ITALIAN.GXT": "PSP_GAME/USRDIR/TEXT/ITALIAN.GXT",
     "GAME.DTZ": "PSP_GAME/USRDIR/CHK/PSPHR/GAME.DTZ",
 }
 
 # GTA: Vice City Stories PS2 target paths. All seven replacements are loaded
-# locally from Assets/VCS_PS2 beside the source script or built EXE.
+# bundled from Assets/VCS_PS2 into the one-file EXE when present.
 VCS_PS2_TARGET_PATHS = {
     "AMERICAN.GXT": "AMERICAN.GXT",
     "ENGLISH.GXT": "ENGLISH.GXT",
@@ -496,15 +510,6 @@ VC_PS2_TARGET_PATHS = {
     "AMERICAN.GXT": "TEXT/AMERICAN.GXT",
     "VCPR.VB": "AUDIO/MUSIC/VCPR.VB",
     "FRONTEN2.TXD": "MODELS/FRONTEN2.TXD",
-}
-III_PS2_TARGET_PATHS = {
-    "AMERICAN.GXT": "TEXT/AMERICAN.GXT",
-    "KJAH.VB": "AUDIO/MUSIC/KJAH.VB",
-    "FRONTEND.TXD": "MODELS/FRONTEND.TXD",
-}
-III_PS2_SERIALS = {
-    "SLUS-20062", "SLES-50330", "SLES-50331", "SLES-50332",
-    "SLUS-20300", "SLPM-65041",
 }
 
 
@@ -521,7 +526,22 @@ LCS_PS2_SERIALS = {
     "SLPM-66851", "SLPM-55038",  # Japan releases
 }
 
-# GTA: San Andreas PS2 replacement paths. Assets are user-managed locally.
+
+# GTA III PS2 replacements are bundled from Assets/III_PS2. KJAH.VB is a
+# user-supplied local payload and is embedded when present during the EXE build.
+III_PS2_TARGET_PATHS = {
+    "AMERICAN.GXT": "TEXT/AMERICAN.GXT",
+    "FRONTEND.TXD": "MODELS/FRONTEND.TXD",
+    "KJAH.VB": "AUDIO/MUSIC/KJAH.VB",
+}
+III_PS2_SERIALS = {
+    "SLUS-20062",  # North America, including Greatest Hits reprints
+    "SLES-50330",  # Europe
+    "SLES-50793",  # Australia
+    "SLPM-65382", "SLPM-65760", "SLPM-66789", "SLPM-55293",  # Japan releases
+}
+
+# GTA: San Andreas PS2 replacement paths; payloads are bundled from Assets/SA_PS2.
 SA_PS2_TARGET_PATHS = {
     "FRONTEN1.TXD": "MODELS/FRONTEN1.TXD",
     "AMERICAN.GXT": "TEXT/AMERICAN.GXT",
@@ -643,39 +663,6 @@ def identify_sa_ps2_iso(image: Iso9660) -> str:
     )
 
 
-
-def identify_iii_ps2_iso(image: Iso9660) -> str:
-    """Confirm the ISO's SYSTEM.CNF boot serial matches a known GTA III PS2 release."""
-    cnf_entries = [r for r in image.records if not r.directory and r.path.upper() == "SYSTEM.CNF"]
-    if len(cnf_entries) != 1:
-        raise ValueError(
-            "Could not uniquely identify the game's SYSTEM.CNF in the ISO. "
-            "This tab only supports GTA III (PS2) discs."
-        )
-    record = cnf_entries[0]
-    if record.file_unit_size or record.interleave_gap or (record.flags & 0x80):
-        raise ValueError("SYSTEM.CNF uses an unsupported ISO layout; refusing to guess the game identity.")
-    with open(image.path, "rb") as fh:
-        offset = record.data_extent * SECTOR_SIZE
-        if offset < 0 or offset + record.size > image.file_size or record.size > 1024 * 1024:
-            raise ValueError("SYSTEM.CNF has an invalid or unexpectedly large ISO directory entry.")
-        fh.seek(offset)
-        content = fh.read(record.size)
-    if len(content) != record.size:
-        raise ValueError("Could not read SYSTEM.CNF from the selected ISO.")
-    text = content.decode("ascii", errors="ignore").upper()
-    found = set()
-    for match in re.finditer(r"\b(SLUS|SLES|SLPM)[_-]?(\d{3})[._-]?(\d{2})\b", text):
-        found.add(f"{match.group(1)}-{match.group(2)}{match.group(3)}")
-    if found & III_PS2_SERIALS:
-        return sorted(found & III_PS2_SERIALS)[0]
-    detected = ", ".join(sorted(found)) if found else "no recognized PS2 serial"
-    raise ValueError(
-        f"Could not verify this as a supported GTA III (PS2) ISO ({detected}). "
-        "Only recognized GTA III PS2 disc versions are accepted by this tab."
-    )
-
-
 def identify_lcs_ps2_iso(image: Iso9660) -> str:
     """Verify a GTA: Liberty City Stories PS2 image using its SYSTEM.CNF serial."""
     cnf_entries = [r for r in image.records if not r.directory and r.path.upper() == "SYSTEM.CNF"]
@@ -703,6 +690,33 @@ def identify_lcs_ps2_iso(image: Iso9660) -> str:
     raise ValueError(f"Could not verify this as a supported GTA: Liberty City Stories (PS2) ISO ({detected}). Only recognized LCS PS2 releases are accepted.")
 
 
+def identify_gta3_ps2_iso(image: Iso9660) -> str:
+    """Verify a GTA III PS2 image using its SYSTEM.CNF serial."""
+    cnf_entries = [r for r in image.records if not r.directory and r.path.upper() == "SYSTEM.CNF"]
+    if len(cnf_entries) != 1:
+        raise ValueError("Could not uniquely find SYSTEM.CNF. This tab only supports GTA III (PS2) discs.")
+    record = cnf_entries[0]
+    if record.file_unit_size or record.interleave_gap or (record.flags & 0x80):
+        raise ValueError("SYSTEM.CNF uses an unsupported ISO layout; refusing to guess the game identity.")
+    with open(image.path, "rb") as fh:
+        offset = record.data_extent * SECTOR_SIZE
+        if offset < 0 or offset + record.size > image.file_size or record.size > 1024 * 1024:
+            raise ValueError("SYSTEM.CNF has an invalid or unexpectedly large ISO directory entry.")
+        fh.seek(offset)
+        content = fh.read(record.size)
+    if len(content) != record.size:
+        raise ValueError("Could not read SYSTEM.CNF from the selected ISO.")
+    text = content.decode("ascii", errors="ignore").upper()
+    found = set()
+    for match in re.finditer(r"\b(SLUS|SLES|SLPM)[_-]?(\d{3})[._-]?(\d{2})\b", text):
+        found.add(f"{match.group(1)}-{match.group(2)}{match.group(3)}")
+    matched = sorted(found & III_PS2_SERIALS)
+    if matched:
+        return matched[0]
+    detected = ", ".join(sorted(found)) if found else "no recognized PS2 serial"
+    raise ValueError(f"Could not verify this as a supported GTA III (PS2) ISO ({detected}). Only recognized GTA III PS2 releases are accepted.")
+
+
 def _check_lcs_ps2_image_and_patch_iso(iso_path: Path, output_path: Path, payload_paths: dict[str, Path], status_callback=lambda s: None) -> str:
     """Patch KJAH.VB, ENGLISH.GXT and GAME.DTZ into a new LCS PS2 ISO copy."""
     iso_path = Path(iso_path).expanduser()
@@ -711,8 +725,6 @@ def _check_lcs_ps2_image_and_patch_iso(iso_path: Path, output_path: Path, payloa
         raise ValueError("Please choose an existing GTA: Liberty City Stories (PS2) ISO image.")
     if iso_path.resolve() == output_path.resolve():
         raise ValueError("The output path must differ from the source ISO. The source will never be overwritten.")
-    if output_path.exists():
-        raise FileExistsError(f"The output file already exists: {output_path}\nChoose a different output filename.")
 
     resolved_payloads: dict[str, Path] = {}
     for name in LCS_PS2_TARGET_PATHS:
@@ -798,6 +810,99 @@ def _check_lcs_ps2_image_and_patch_iso(iso_path: Path, output_path: Path, payloa
             f"Files replaced:\n{details}\n\nThe source ISO was left unchanged. This patch is experimental and has not been verified in-game. Test the patched image in PCSX2 first.")
 
 
+def _check_gta3_ps2_image_and_patch_iso(iso_path: Path, output_path: Path, payload_paths: dict[str, Path], status_callback=lambda s: None) -> str:
+    """Patch AMERICAN.GXT, FRONTEND.TXD and KJAH.VB into a new GTA III PS2 ISO copy."""
+    iso_path = Path(iso_path).expanduser()
+    output_path = Path(output_path).expanduser()
+    if not iso_path.is_file():
+        raise ValueError("Please choose an existing GTA III (PS2) ISO image.")
+    if iso_path.resolve() == output_path.resolve():
+        raise ValueError("The output path must differ from the source ISO. The source will never be overwritten.")
+
+    resolved_payloads: dict[str, Path] = {}
+    for name in III_PS2_TARGET_PATHS:
+        selected = payload_paths.get(name)
+        if selected is None:
+            raise ValueError(f"Required GTA III PS2 replacement '{name}' is missing. Add it to Assets/III_PS2 and rebuild the EXE.")
+        selected = Path(selected).expanduser().resolve()
+        if not selected.is_file():
+            raise ValueError(f"Replacement file '{name}' was not found. Add it to Assets/III_PS2 and rebuild the EXE.")
+        if selected.stat().st_size <= 0:
+            raise ValueError(f"Replacement file '{name}' is empty.")
+        if selected == iso_path.resolve():
+            raise ValueError(f"The ISO image itself cannot be used as the '{name}' replacement.")
+        resolved_payloads[name] = selected
+
+    status_callback("Checking GTA III PS2 ISO9660 structure…")
+    image = Iso9660(iso_path)
+    records = image.scan()
+    game_serial = identify_gta3_ps2_iso(image)
+    status_callback(f"Verified GTA III (PS2) disc ({game_serial}).")
+    records_by_path: dict[str, list[Record]] = {}
+    for rec in records:
+        records_by_path.setdefault(rec.path.upper().rstrip(";1"), []).append(rec)
+
+    targets: dict[str, Record] = {}
+    for payload_name, target_path in III_PS2_TARGET_PATHS.items():
+        matches = records_by_path.get(target_path.upper(), [])
+        if len(matches) != 1:
+            if not matches:
+                raise ValueError(f"Could not find required target '{target_path}' in this GTA III PS2 ISO.")
+            raise ValueError(f"More than one '{target_path}' entry was found; refusing an ambiguous patch.")
+        target = matches[0]
+        if target.directory:
+            raise ValueError(f"The target '{target_path}' is a directory, not a file.")
+        if target.file_unit_size or target.interleave_gap:
+            raise ValueError(f"The target '{target_path}' uses ISO interleaving, which this patcher does not support.")
+        if target.flags & 0x80:
+            raise ValueError(f"The target '{target_path}' is split across multiple ISO extents; this patcher will not modify it.")
+        if target.size <= 0 or target.end_sector > image.total_sectors:
+            raise ValueError(f"The target '{target_path}' has an invalid extent; refusing to patch it.")
+        for other in records:
+            if other.record_offset == target.record_offset or other.sectors == 0:
+                continue
+            if other.data_extent < target.end_sector and target.data_extent < other.end_sector:
+                raise ValueError(f"ISO layout check failed: '{other.path}' overlaps '{target_path}'. No changes were made.")
+        targets[payload_name] = target
+
+    intervals = sorted((rec.data_extent, rec.end_sector, name) for name, rec in targets.items())
+    for left, right in zip(intervals, intervals[1:]):
+        if left[1] > right[0]:
+            raise ValueError(f"The ISO has overlapping target extents ({left[2]} and {right[2]}). No changes were made.")
+
+    status_callback("Creating a patched GTA III PS2 ISO copy…")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copyfile(iso_path, output_path)
+        relocated_targets: set[str] = set()
+        next_free_sector = image.total_sectors
+        with open(output_path, "r+b") as out:
+            for index, payload_name in enumerate(III_PS2_TARGET_PATHS, start=1):
+                target = targets[payload_name]
+                status_callback(f"Writing file {index}/{len(III_PS2_TARGET_PATHS)}: {payload_name}…")
+                next_free_sector, relocated = _write_iso_replacement(out, target, resolved_payloads[payload_name], next_free_sector)
+                if relocated:
+                    relocated_targets.add(payload_name)
+                    status_callback(f"Relocated larger replacement {payload_name} to new ISO sectors…")
+            _update_iso_volume_space_size(out, next_free_sector)
+            out.flush()
+            os.fsync(out.fileno())
+    except Exception:
+        try:
+            output_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+    details = "\n".join(
+        f"  {III_PS2_TARGET_PATHS[name]}\n    {targets[name].size:,} → {resolved_payloads[name].stat().st_size:,} bytes" +
+        (" (relocated to a new ISO extent)" if name in relocated_targets else "")
+        for name in III_PS2_TARGET_PATHS
+    )
+    return (f"Patch completed.\n\nSource: {iso_path}\nPatched copy: {output_path}\nVerified disc: {game_serial}\n\n"
+            f"Files replaced:\n{details}\n\nThe source ISO was left unchanged. This patch is experimental and has not been verified in-game. Test the patched image in PCSX2 first.")
+
+
 def _check_image_and_patch_iso(iso_path: Path, output_path: Path, payload_paths: dict[str, Path], status_callback=lambda s: None) -> str:
     """Patch VCS PS2 audio, five language GXT files and GAME.DTZ into a copy."""
     iso_path = Path(iso_path).expanduser()
@@ -806,14 +911,12 @@ def _check_image_and_patch_iso(iso_path: Path, output_path: Path, payload_paths:
         raise ValueError("Please choose an existing GTA: Vice City Stories (PS2) ISO image.")
     if iso_path.resolve() == output_path.resolve():
         raise ValueError("The output path must differ from the source ISO. The source will never be overwritten.")
-    if output_path.exists():
-        raise FileExistsError(f"The output file already exists: {output_path}\nChoose a different output filename.")
 
     resolved_payloads: dict[str, Path] = {}
     for name in VCS_PS2_TARGET_PATHS:
         selected = payload_paths.get(name)
         if selected is None:
-            raise ValueError(f"Required VCS PS2 replacement '{name}' is missing. Put it in Assets/VCS_PS2 beside the application.")
+            raise ValueError(f"Required VCS PS2 replacement '{name}' is missing from Assets/VCS_PS2; add it before building the EXE.")
         selected = Path(selected).expanduser().resolve()
         if not selected.is_file():
             raise ValueError(f"Replacement file '{name}' was not found: {selected}")
@@ -903,14 +1006,12 @@ def _check_vc_ps2_image_and_patch_iso(iso_path: Path, output_path: Path, payload
         raise ValueError("Please choose an existing GTA: Vice City (PS2) ISO image.")
     if iso_path.resolve() == output_path.resolve():
         raise ValueError("The output path must differ from the source ISO. The source will never be overwritten.")
-    if output_path.exists():
-        raise FileExistsError(f"The output file already exists: {output_path}\nChoose a different output filename.")
 
     resolved_payloads: dict[str, Path] = {}
     for name in VC_PS2_TARGET_PATHS:
         selected = payload_paths.get(name)
         if selected is None:
-            raise ValueError(f"Required classic Vice City PS2 replacement '{name}' is missing. Put it in Assets/VC_PS2 beside the application.")
+            raise ValueError(f"Required classic Vice City PS2 replacement '{name}' is missing from Assets/VC_PS2; add it before building the EXE.")
         selected = Path(selected).expanduser().resolve()
         if not selected.is_file():
             raise ValueError(f"Replacement file '{name}' was not found: {selected}")
@@ -992,120 +1093,20 @@ def _check_vc_ps2_image_and_patch_iso(iso_path: Path, output_path: Path, payload
             f"Files replaced:\n{details}\n\nThe source ISO was left unchanged. This patch is experimental and has not been verified in-game. Test the patched image in PCSX2 first.")
 
 
-
-def _check_iii_ps2_image_and_patch_iso(iso_path: Path, output_path: Path, payload_paths: dict[str, Path], status_callback=lambda s: None) -> str:
-    """Patch GTA III PS2 text, audio and model files into a copy."""
-    iso_path = Path(iso_path).expanduser()
-    output_path = Path(output_path).expanduser()
-    if not iso_path.is_file():
-        raise ValueError("Please choose an existing GTA III (PS2) ISO image.")
-    if iso_path.resolve() == output_path.resolve():
-        raise ValueError("The output path must differ from the source ISO. The source will never be overwritten.")
-    if output_path.exists():
-        raise FileExistsError(f"The output file already exists: {output_path}\nChoose a different output filename.")
-
-    resolved_payloads: dict[str, Path] = {}
-    for name in III_PS2_TARGET_PATHS:
-        selected = payload_paths.get(name)
-        if selected is None:
-            raise ValueError(f"Required GTA III PS2 replacement '{name}' is missing. Put it in Assets/III_PS2 beside the application.")
-        selected = Path(selected).expanduser().resolve()
-        if not selected.is_file():
-            raise ValueError(f"Replacement file '{name}' was not found: {selected}")
-        if selected.stat().st_size <= 0:
-            raise ValueError(f"Replacement file '{name}' is empty.")
-        if selected == iso_path.resolve():
-            raise ValueError(f"The ISO image itself cannot be used as the '{name}' replacement.")
-        resolved_payloads[name] = selected
-
-    status_callback("Checking GTA III PS2 ISO9660 structure…")
-    image = Iso9660(iso_path)
-    records = image.scan()
-    game_serial = identify_iii_ps2_iso(image)
-    status_callback(f"Verified GTA III (PS2) disc ({game_serial}).")
-    records_by_path: dict[str, list[Record]] = {}
-    for rec in records:
-        records_by_path.setdefault(rec.path.upper().rstrip(";1"), []).append(rec)
-
-    targets: dict[str, Record] = {}
-    for payload_name, target_path in III_PS2_TARGET_PATHS.items():
-        matches = records_by_path.get(target_path.upper(), [])
-        if len(matches) != 1:
-            if not matches:
-                raise ValueError(f"Could not find required target '{target_path}' in this GTA III PS2 ISO.")
-            raise ValueError(f"More than one '{target_path}' entry was found; refusing an ambiguous patch.")
-        target = matches[0]
-        if target.directory:
-            raise ValueError(f"The target '{target_path}' is a directory, not a file.")
-        if target.file_unit_size or target.interleave_gap:
-            raise ValueError(f"The target '{target_path}' uses ISO interleaving, which this patcher does not support.")
-        if target.flags & 0x80:
-            raise ValueError(f"The target '{target_path}' is split across multiple ISO extents; this patcher will not modify it.")
-        if target.size <= 0 or target.end_sector > image.total_sectors:
-            raise ValueError(f"The target '{target_path}' has an invalid extent; refusing to patch it.")
-        targets[payload_name] = target
-
-    # Reject overlapping existing target allocations and collisions with any other ISO record.
-    for name, target in targets.items():
-        for other in records:
-            if other.record_offset == target.record_offset or other.sectors == 0:
-                continue
-            if other.data_extent < target.end_sector and target.data_extent < other.end_sector:
-                raise ValueError(f"ISO layout check failed: '{other.path}' overlaps '{III_PS2_TARGET_PATHS[name]}'. No changes were made.")
-    intervals = sorted((rec.data_extent, rec.end_sector, name) for name, rec in targets.items())
-    for left, right in zip(intervals, intervals[1:]):
-        if left[1] > right[0]:
-            raise ValueError(f"The ISO has overlapping target extents ({left[2]} and {right[2]}). No changes were made.")
-
-    status_callback("Creating a patched GTA III PS2 ISO copy…")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    relocated_targets: set[str] = set()
-    next_free_sector = image.total_sectors
-    try:
-        shutil.copyfile(iso_path, output_path)
-        with open(output_path, "r+b") as out:
-            for index, payload_name in enumerate(III_PS2_TARGET_PATHS, start=1):
-                target = targets[payload_name]
-                status_callback(f"Writing file {index}/{len(III_PS2_TARGET_PATHS)}: {payload_name}…")
-                next_free_sector, relocated = _write_iso_replacement(out, target, resolved_payloads[payload_name], next_free_sector)
-                if relocated:
-                    relocated_targets.add(payload_name)
-                    status_callback(f"Relocated larger replacement {payload_name} to new ISO sectors…")
-            _update_iso_volume_space_size(out, next_free_sector)
-            out.flush()
-            os.fsync(out.fileno())
-    except Exception:
-        try:
-            output_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
-
-    details = "\n".join(
-        f"  {III_PS2_TARGET_PATHS[name]}\n    {targets[name].size:,} → {resolved_payloads[name].stat().st_size:,} bytes" +
-        (" (relocated to a new ISO extent)" if name in relocated_targets else "")
-        for name in III_PS2_TARGET_PATHS
-    )
-    return (f"Patch completed.\n\nSource: {iso_path}\nPatched copy: {output_path}\nVerified disc: {game_serial}\n\n"
-            f"Files replaced:\n{details}\n\nThe source ISO was left unchanged. This patch is experimental and has not been verified in-game. Test the patched image in PCSX2 first.")
-
-
 def _check_sa_ps2_image_and_patch_iso(iso_path: Path, output_path: Path, payload_paths: dict[str, Path], status_callback=lambda s: None) -> str:
-    """Patch the four local San Andreas PS2 replacements into a new image copy."""
+    """Patch the four bundled San Andreas PS2 replacements into a new image copy."""
     iso_path = Path(iso_path).expanduser()
     output_path = Path(output_path).expanduser()
     if not iso_path.is_file():
         raise ValueError("Please choose an existing GTA: San Andreas (PS2) ISO image.")
     if iso_path.resolve() == output_path.resolve():
         raise ValueError("The output path must differ from the source ISO. The source will never be overwritten.")
-    if output_path.exists():
-        raise FileExistsError(f"The output file already exists: {output_path}\nChoose a different output filename.")
 
     resolved_payloads: dict[str, Path] = {}
     for name in SA_PS2_TARGET_PATHS:
         selected = payload_paths.get(name)
         if selected is None:
-            raise ValueError(f"Required San Andreas PS2 replacement '{name}' is missing. Put it in Assets/SA_PS2 beside the application.")
+            raise ValueError(f"Required San Andreas PS2 replacement '{name}' is missing from Assets/SA_PS2; add it before building the EXE.")
         selected = Path(selected).expanduser().resolve()
         if not selected.is_file():
             raise ValueError(f"Replacement file '{name}' was not found: {selected}")
@@ -1200,8 +1201,6 @@ def _check_psp_image_and_patch_iso(
         raise ValueError("Please choose an existing PSP ISO image.")
     if iso_path.resolve() == output_path.resolve():
         raise ValueError("The output path must differ from the source ISO. The source will never be overwritten.")
-    if output_path.exists():
-        raise FileExistsError(f"The output file already exists: {output_path}\nChoose a different output filename.")
 
     resolved_payloads: dict[str, Path] = {}
     for name in PSP_TARGET_PATHS:
@@ -1350,15 +1349,13 @@ def _check_lcs_psp_image_and_patch_iso(
     payload_paths: dict[str, Path],
     status_callback=lambda s: None,
 ) -> str:
-    """Patch the bundled LCS PSP KJAH.AT3, ENGLISH.GXT, and GAME.DTZ files."""
+    """Patch LCS PSP radio, all bundled language GXT files, and GAME.DTZ."""
     iso_path = Path(iso_path).expanduser()
     output_path = Path(output_path).expanduser()
     if not iso_path.is_file():
         raise ValueError("Please choose an existing GTA: Liberty City Stories (PSP) ISO image.")
     if iso_path.resolve() == output_path.resolve():
         raise ValueError("The output path must differ from the source ISO. The source will never be overwritten.")
-    if output_path.exists():
-        raise FileExistsError(f"The output file already exists: {output_path}\nChoose a different output filename.")
 
     resolved_payloads: dict[str, Path] = {}
     for name in LCS_PSP_TARGET_PATHS:
@@ -1366,7 +1363,7 @@ def _check_lcs_psp_image_and_patch_iso(
         if selected is None or not str(selected).strip():
             raise ValueError(
                 f"The required embedded LCS PSP replacement '{name}' is missing from this installer build. "
-                "Rebuild with all three files in Assets/LCS_PSP."
+                "Rebuild with all seven files in Assets/LCS_PSP."
             )
         selected = Path(selected).expanduser().resolve()
         if not selected.is_file():
@@ -1681,21 +1678,18 @@ def _run_with_cso_support(core, source_path: Path, output_path: Path, core_args:
         raise ValueError("The output path must differ from the source image. The source will never be overwritten.")
     if not source_path.is_file():
         raise ValueError("Please choose an existing ISO/CSO image.")
-    cso_output_version = _cso_version(source_path) if source_ext == ".cso" and output_ext == ".cso" else 1
-    # Existing output files are supported, but never overwrite the input image.
-    # Move an existing destination aside so failed patching can restore it intact.
-    backup_path: Path | None = None
+
+    # Allow overwrite safely: preserve the old output until the new patch succeeds.
+    output_backup: Path | None = None
     if output_path.exists():
-        if not output_path.is_file():
-            raise ValueError(f"The output path exists but is not a file: {output_path}")
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, backup_name = tempfile.mkstemp(prefix="hololive_output_backup_", suffix=output_path.suffix, dir=str(output_path.parent))
+        fd, backup_name = tempfile.mkstemp(prefix=f".{output_path.name}.", suffix=".overwrite-backup", dir=str(output_path.parent))
         os.close(fd)
-        backup_path = Path(backup_name)
-        backup_path.unlink(missing_ok=True)
-        os.replace(output_path, backup_path)
+        output_backup = Path(backup_name)
+        output_backup.unlink(missing_ok=True)
+        os.replace(output_path, output_backup)
 
     temporary_paths: list[Path] = []
+    cso_output_version = _cso_version(source_path) if source_ext == ".cso" and output_ext == ".cso" else 1
     source_iso = source_path
     patched_iso = output_path
     try:
@@ -1720,25 +1714,21 @@ def _run_with_cso_support(core, source_path: Path, output_path: Path, core_args:
         result = result.replace(str(source_iso), str(source_path)).replace(str(patched_iso), str(output_path))
         if output_ext == ".cso":
             result = result.replace("Patched ISO", "Patched CSO").replace("ISO copy", "CSO copy")
-        if backup_path is not None:
-            backup_path.unlink(missing_ok=True)
-            backup_path = None
         return result
     except Exception:
         try:
             output_path.unlink(missing_ok=True)
         except OSError:
             pass
-        if backup_path is not None and backup_path.exists():
-            os.replace(backup_path, output_path)
-            backup_path = None
+        if output_backup is not None and output_backup.exists():
+            os.replace(output_backup, output_path)
+            output_backup = None
         raise
+    else:
+        if output_backup is not None:
+            output_backup.unlink(missing_ok=True)
+            output_backup = None
     finally:
-        if backup_path is not None and backup_path.exists() and not output_path.exists():
-            try:
-                os.replace(backup_path, output_path)
-            except OSError:
-                pass
         for temporary in temporary_paths:
             try:
                 temporary.unlink(missing_ok=True)
@@ -1766,12 +1756,13 @@ def check_vc_ps2_image_and_patch(iso_path: Path, output_path: Path, payload_path
     return _run_with_cso_support(_check_vc_ps2_image_and_patch_iso, iso_path, output_path, (payload_paths,), status_callback)
 
 
-def check_iii_ps2_image_and_patch(iso_path: Path, output_path: Path, payload_paths: dict[str, Path], status_callback=lambda s: None) -> str:
-    return _run_with_cso_support(_check_iii_ps2_image_and_patch_iso, iso_path, output_path, (payload_paths,), status_callback)
-
-
 def check_lcs_ps2_image_and_patch(iso_path: Path, output_path: Path, payload_paths: dict[str, Path], status_callback=lambda s: None) -> str:
     return _run_with_cso_support(_check_lcs_ps2_image_and_patch_iso, iso_path, output_path, (payload_paths,), status_callback)
+
+
+
+def check_gta3_ps2_image_and_patch(iso_path: Path, output_path: Path, payload_paths: dict[str, Path], status_callback=lambda s: None) -> str:
+    return _run_with_cso_support(_check_gta3_ps2_image_and_patch_iso, iso_path, output_path, (payload_paths,), status_callback)
 
 
 def _find_child_case_insensitive(parent: Path, name: str, want_directory: bool) -> Path:
@@ -2011,18 +2002,144 @@ def install_sa_pc_assets(game_dir: Path, payload_paths: dict[str, Path]) -> str:
     return f"GTA: San Andreas PC TK station files installed successfully.\n\nGame folder: {root}\nFiles installed:\n{installed}{backup_note}"
 
 
+def install_definitive_edition_pak(game_dir: Path, payload_path: Path, game_display_name: str) -> str:
+    """Install one bundled DE .pak into Gameface/Content/Paks/~mods with a backup."""
+    root = Path(game_dir).expanduser().resolve()
+    source = Path(payload_path).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"Choose the existing root folder of your {game_display_name} installation.")
+    if not source.is_file():
+        raise ValueError(f"The bundled {DE_PAK_FILENAME} payload was not found: {source}")
+    if source.stat().st_size <= 0:
+        raise ValueError(f"The bundled {DE_PAK_FILENAME} payload is empty.")
+
+    # Validate the selected root through the expected game layout; ~mods itself
+    # is commonly absent and is created when required.
+    gameface = _find_child_case_insensitive(root, "Gameface", True)
+    content = _find_child_case_insensitive(gameface, "Content", True)
+    paks = _find_child_case_insensitive(content, "Paks", True)
+    try:
+        mods = _find_child_case_insensitive(paks, "~mods", True)
+    except ValueError:
+        mods = paks / "~mods"
+        mods.mkdir()
+
+    destination = mods / DE_PAK_FILENAME
+    if destination.exists() and destination.is_dir():
+        raise ValueError(f"The destination '{destination}' is a folder, not a file.")
+    if source == destination.resolve():
+        return f"{DE_PAK_FILENAME} is already at its destination.\n\nGame folder: {root}"
+
+    backup_root = None
+    if destination.exists():
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_root = root / f"HololiveRadioInstaller_DE_Backup_{stamp}"
+        suffix = 1
+        while backup_root.exists():
+            backup_root = root / f"HololiveRadioInstaller_DE_Backup_{stamp}_{suffix:02d}"
+            suffix += 1
+        backup_path = backup_root / Path("Gameface") / "Content" / "Paks" / "~mods" / DE_PAK_FILENAME
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(destination, backup_path)
+
+    temporary = destination.with_name(f".{destination.name}.hololive-tmp-{os.getpid()}-{threading.get_ident()}")
+    try:
+        if temporary.exists():
+            temporary.unlink()
+        shutil.copy2(source, temporary)
+        os.replace(temporary, destination)
+    except Exception as exc:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        backup_note = f" A backup of the previous mod was saved at {backup_root}." if backup_root else ""
+        raise RuntimeError(f"Could not install {DE_PAK_FILENAME}: {exc}.{backup_note}") from exc
+
+    backup_note = f"\n\nPrevious file backed up to:\n{backup_root}" if backup_root else "\n\nNo existing mod file needed backing up."
+    return (f"Hololive Radio .pak installed successfully.\n\nGame: {game_display_name}\n"
+            f"Game folder: {root}\nInstalled file: {destination.relative_to(root).as_posix()}{backup_note}")
+
+
+def set_windows_taskbar_app_id() -> None:
+    """Give Windows a stable application identity so the taskbar uses our EXE icon."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        set_app_id = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
+        set_app_id.argtypes = [ctypes.c_wchar_p]
+        set_app_id.restype = ctypes.c_long
+        set_app_id("HololiveRadio.Installer")
+    except (AttributeError, OSError, TypeError):
+        # Icon resources are still set directly on the Tk root as a fallback.
+        pass
+
+
 class App:
     def __init__(self):
         self.customization = load_customization()
+        # Windows chooses/group taskbar items before the first top-level window
+        # appears, so set the AppUserModelID before creating Tk.
+        set_windows_taskbar_app_id()
         self.root = tk.Tk()
         self.root.title(self.customization["window_title"] or APP_TITLE)
         self._apply_visual_theme()
+        # Apply both the multi-resolution ICO and PNG icon. Windows uses the ICO
+        # for the executable/taskbar, while iconphoto sets the live Tk window
+        # icon consistently (including high-DPI taskbar representations).
         try:
-            self.root.iconbitmap(str(asset_path("hololive_radio_icon.ico")))
+            icon_ico = asset_path("hololive_radio_icon.ico")
+            self.root.iconbitmap(default=str(icon_ico))
+            self.root.iconbitmap(str(icon_ico))
         except (tk.TclError, OSError):
             pass
+        try:
+            self._hololive_icon_photo = tk.PhotoImage(file=str(asset_path("hololive_radio_icon.png")))
+            self.root.iconphoto(True, self._hololive_icon_photo)
+        except (tk.TclError, OSError):
+            self._hololive_icon_photo = None
         self.root.geometry(f"{self.customization['window_width']}x{self.customization['window_height']}")
-        self.root.minsize(650, 450)
+        self.root.minsize(946, 500)
+        # Keep two source assets for compatibility, but always render the
+        # highest-resolution artwork to the live banner width. This avoids a
+        # visible jump between fixed-size compact/maximized variants.
+        self.banner_custom_source = None
+        self.banner_custom_fallback = None
+        custom_banner_name = self.customization.get("banner_custom_image", "")
+        if self.customization.get("banner_enabled", True) and custom_banner_name:
+            self.banner_custom_source = self._load_banner_source(custom_banner_name)
+            if self.banner_custom_source is None:
+                self.banner_custom_fallback = self._load_banner_image(custom_banner_name)
+        self.banner_default_source = self._load_banner_source("hololive_radio_banner_default.png")
+        self.banner_fullscreen_source = self._load_banner_source("hololive_radio_banner_fullscreen.png")
+        self.banner_legacy_source = self._load_banner_source("hololive_radio_banner.png")
+        self.banner_default_fallback = None
+        self.banner_fullscreen_fallback = None
+        if self.banner_default_source is None or self.banner_fullscreen_source is None:
+            self.banner_default_fallback = self._load_banner_image("hololive_radio_banner_default.png")
+            self.banner_fullscreen_fallback = self._load_banner_image("hololive_radio_banner_fullscreen.png")
+            if self.banner_default_fallback is None:
+                self.banner_default_fallback = self._load_banner_image("hololive_radio_banner.png")
+            if self.banner_fullscreen_fallback is None:
+                self.banner_fullscreen_fallback = self.banner_default_fallback or self._load_banner_image("hololive_radio_banner.png")
+        if self.banner_default_source is None and self.banner_legacy_source is not None:
+            self.banner_default_source = self.banner_legacy_source
+        if self.banner_fullscreen_source is None and self.banner_legacy_source is not None:
+            self.banner_fullscreen_source = self.banner_legacy_source
+        if self.banner_default_source is None and self.banner_default_fallback is None:
+            self.banner_default_fallback = self.banner_fullscreen_fallback
+        if self.banner_fullscreen_source is None and self.banner_fullscreen_fallback is None:
+            self.banner_fullscreen_fallback = self.banner_default_fallback
+        if self.banner_default_source is None and self.banner_default_fallback is None:
+            self.banner_default_fallback = self.banner_fullscreen_fallback
+        self.banner_image = None
+        self._banner_render_key = None
+        self.banner_label = None
+        self.banner_host = None
+        self._banner_update_after = None
+        self._banner_expanded = None
+        self._banner_last_dimensions = None
         self.iso_var = tk.StringVar()
         self.out_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Choose a GTA: Vice City Stories (PS2) ISO image to begin.")
@@ -2030,14 +2147,14 @@ class App:
         self.vc_ps2_out_var = tk.StringVar()
         self.vc_ps2_status_var = tk.StringVar(value="Choose a GTA: Vice City (PS2) ISO image to begin.")
         self.vc_ps2_events: queue.Queue[tuple[str, object]] = queue.Queue()
-        self.iii_ps2_iso_var = tk.StringVar()
-        self.iii_ps2_out_var = tk.StringVar()
-        self.iii_ps2_status_var = tk.StringVar(value="Choose a GTA III (PS2) ISO image to begin.")
-        self.iii_ps2_events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.lcs_ps2_iso_var = tk.StringVar()
         self.lcs_ps2_out_var = tk.StringVar()
         self.lcs_ps2_status_var = tk.StringVar(value="Choose a GTA: Liberty City Stories (PS2) ISO image to begin.")
         self.lcs_ps2_events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.gta3_ps2_iso_var = tk.StringVar()
+        self.gta3_ps2_out_var = tk.StringVar()
+        self.gta3_ps2_status_var = tk.StringVar(value="Choose a GTA III (PS2) ISO image to begin.")
+        self.gta3_ps2_events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.sa_ps2_iso_var = tk.StringVar()
         self.sa_ps2_out_var = tk.StringVar()
         self.sa_ps2_status_var = tk.StringVar(value="Choose a GTA: San Andreas (PS2) ISO image to begin.")
@@ -2054,174 +2171,358 @@ class App:
         self.pc_status_var = tk.StringVar(value="Choose your GTA: Vice City PC installation folder to begin.")
         self.sa_pc_dir_var = tk.StringVar()
         self.sa_pc_status_var = tk.StringVar(value="Choose your GTA: San Andreas PC installation folder to begin.")
+        self.de_dir_vars = {key: tk.StringVar() for key in DE_INSTALL_TARGETS}
+        self.de_status_vars = {key: tk.StringVar(value=f"Choose your {config['display']} installation folder to begin.") for key, config in DE_INSTALL_TARGETS.items()}
+        self.de_install_buttons = {}
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self._build_ui()
+        self.root.bind("<Configure>", self._on_root_configure, add="+")
+        if self.banner_host is not None:
+            self.banner_host.bind("<Configure>", self._on_root_configure, add="+")
+        self.root.after_idle(self._update_banner_for_window_size)
         self.root.after(100, self._poll_events)
         self.root.after(100, self._poll_psp_events)
         self.root.after(100, self._poll_lcs_events)
         self.root.after(100, self._poll_lcs_ps2_events)
+        self.root.after(100, self._poll_gta3_ps2_events)
         self.root.after(100, self._poll_vc_ps2_events)
-        self.root.after(100, self._poll_iii_ps2_events)
         self.root.after(100, self._poll_sa_ps2_events)
 
+    @staticmethod
+    def _banner_candidate_paths(filename: str) -> list[Path]:
+        """Check the beside-app custom file first, then the bundled resource."""
+        if not filename:
+            return []
+        requested = Path(filename).expanduser()
+        candidates = []
+        if requested.is_absolute():
+            candidates.append(requested)
+        else:
+            candidates.append(app_folder() / requested.name)
+            candidates.append(asset_path(requested.name))
+        unique = []
+        seen = set()
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                resolved = candidate
+            if resolved not in seen:
+                seen.add(resolved)
+                unique.append(resolved)
+        return unique
+
+    @classmethod
+    def _load_banner_source(cls, filename: str):
+        """Load a high-quality source image for responsive resizing."""
+        if Image is None:
+            return None
+        for candidate in cls._banner_candidate_paths(filename):
+            try:
+                with Image.open(candidate) as source:
+                    source.load()
+                    return source.convert("RGBA")
+            except (OSError, ValueError):
+                continue
+        return None
+
+    @classmethod
+    def _load_banner_image(cls, filename: str):
+        """Tk-only fallback for systems running the source without Pillow."""
+        for candidate in cls._banner_candidate_paths(filename):
+            try:
+                return tk.PhotoImage(file=str(candidate))
+            except (tk.TclError, OSError):
+                continue
+        return None
+
+    def _on_root_configure(self, event=None):
+        """Debounce geometry events, then redraw the banner at the live width."""
+        if event is not None and getattr(event, "widget", None) not in (self.root, self.banner_host):
+            return
+        if self._banner_update_after is not None:
+            try:
+                self.root.after_cancel(self._banner_update_after)
+            except tk.TclError:
+                pass
+        # Short debounce keeps resizing responsive without resampling for every
+        # intermediate Windows/Tk configure event while the user drags the edge.
+        self._banner_update_after = self.root.after(24, self._update_banner_for_window_size)
+
+    def _update_banner_for_window_size(self):
+        """Scale the same high-resolution banner smoothly at every window size.
+
+        The image always fills the banner host's available width, from the
+        initial compact window through arbitrary intermediate sizes and a
+        maximized window. Height follows the source aspect ratio so artwork is
+        never squashed or cropped. The full-resolution asset is preferred at
+        every size, avoiding a jump in composition when the window is resized.
+        """
+        self._banner_update_after = None
+        if self.banner_label is None or self.banner_host is None:
+            return
+
+        try:
+            host_width = max(1, int(self.banner_host.winfo_width()))
+        except (tk.TclError, ValueError):
+            return
+        available_width = max(1, host_width - 4)  # label border on both sides
+
+        # Always use the highest-resolution source available. Keep the default
+        # and legacy assets only as fallbacks for older/custom project folders.
+        source = (self.banner_custom_source or self.banner_fullscreen_source
+                  or self.banner_default_source or self.banner_legacy_source)
+        fallback = (self.banner_custom_fallback or self.banner_fullscreen_fallback
+                    or self.banner_default_fallback)
+        if source is None and fallback is None:
+            return
+
+        if source is not None and ImageTk is not None:
+            display_width = available_width
+            fit_mode = self.customization.get("banner_fit_mode", "proportional")
+            if fit_mode == "crop":
+                display_height = max(60, min(260, int(self.customization.get("banner_fixed_height", 120))))
+            else:
+                display_height = max(1, round(source.height * display_width / source.width))
+            source_identity = (self.customization.get("banner_custom_image", ""), source.size)
+            render_key = ("responsive", source_identity, fit_mode, display_width, display_height)
+            if render_key != self._banner_render_key:
+                resampling = getattr(Image, "Resampling", Image)
+                if fit_mode == "crop" and ImageOps is not None:
+                    # Keep a fixed, tidy banner slot without distorting the selected artwork.
+                    resized = ImageOps.fit(source, (display_width, display_height), method=resampling.LANCZOS,
+                                           centering=(0.5, 0.5))
+                elif source.size == (display_width, display_height):
+                    resized = source
+                else:
+                    resized = source.resize((display_width, display_height), resampling.LANCZOS)
+                self.banner_image = ImageTk.PhotoImage(resized, master=self.root)
+                self.banner_label.configure(image=self.banner_image, width=display_width, height=display_height)
+                self._banner_render_key = render_key
+                self._banner_last_dimensions = (display_width, display_height)
+        elif fallback is not None:
+            # Pillow is included in the Windows EXE build. This is a graceful
+            # source-only fallback when Pillow is unavailable; it can only use
+            # the closest bundled static size rather than resampling smoothly.
+            fallback_width = fallback.width()
+            fallback_height = fallback.height()
+            render_key = ("fallback", fallback_width, fallback_height)
+            if render_key != self._banner_render_key:
+                self.banner_image = fallback
+                self.banner_label.configure(image=fallback, width=fallback_width, height=fallback_height)
+                self._banner_render_key = render_key
+                self._banner_last_dimensions = (fallback_width, fallback_height)
+
     def _apply_visual_theme(self):
+        """Apply a soft cyan theme matching the supplied installer reference."""
         style = ttk.Style(self.root)
         try:
             style.theme_use("clam")
         except tk.TclError:
             pass
+
         theme = self.customization["theme"]
         accent = self.customization["accent_color"]
         font_size = self.customization["font_size"]
         if theme == "Dark":
-            background, foreground, field = "#202124", "#f1f3f4", "#303134"
+            background, content, foreground, field = "#101c2c", "#14263a", "#e7f5ff", "#0a2038"
+            border, muted = "#247eb2", "#87b8d7"
         elif theme == "Light":
-            background, foreground, field = "#f5f7fb", "#202124", "#ffffff"
+            background, content, foreground, field = "#d9f3ff", "#dcf4ff", "#104d80", "#f0fbff"
+            border, muted = "#63c5ef", "#588db2"
         else:
-            background, foreground, field = self.root.cget("background"), "#202124", "#ffffff"
+            background = self.root.cget("background")
+            content, foreground, field = background, "#202124", "#ffffff"
+            border, muted = accent, "#5f7890"
+
+        self.palette = {
+            "background": background, "content": content, "foreground": foreground,
+            "field": field, "accent": accent, "border": border, "muted": muted,
+        }
         try:
             self.root.configure(background=background)
         except tk.TclError:
             pass
+
+        font = ("Segoe UI", font_size)
         style.configure("TFrame", background=background)
-        style.configure("TLabel", background=background, foreground=foreground, font=("Segoe UI", font_size))
-        style.configure("TButton", font=("Segoe UI", font_size), padding=(9, 5))
-        style.configure("TEntry", fieldbackground=field, foreground=foreground, insertcolor=foreground)
-        style.configure("TNotebook", background=background, borderwidth=0)
-        style.configure("TNotebook.Tab", background=field, foreground=foreground, padding=(10, 6), font=("Segoe UI", font_size))
-        style.map("TNotebook.Tab", background=[("selected", accent)], foreground=[("selected", "#ffffff")])
-        style.map("TButton", background=[("active", accent)], foreground=[("active", "#ffffff")])
-        style.configure("Horizontal.TProgressbar", troughcolor=field, background=accent)
+        style.configure("Content.TFrame", background=content, relief="solid", borderwidth=1)
+        style.configure("TLabel", background=content, foreground=foreground, font=font)
+        style.configure("TButton", font=font, padding=(7, 4), background=field,
+                        foreground=foreground, borderwidth=1, relief="raised")
+        style.map("TButton",
+                  background=[("disabled", content), ("pressed", accent), ("active", "#c2edff" if theme == "Light" else accent)],
+                  foreground=[("disabled", muted), ("pressed", "#ffffff"), ("active", foreground)])
+        style.configure("TEntry", fieldbackground=field, foreground=foreground,
+                        insertcolor=foreground, padding=(4, 3), borderwidth=1)
+        style.map("TEntry", fieldbackground=[("disabled", content), ("focus", "#ffffff" if theme == "Light" else field)])
+        style.configure("TNotebook", background=background, borderwidth=1, tabmargins=(0, 0, 0, 0))
+        style.configure("TNotebook.Tab", background=field, foreground=foreground,
+                        padding=(5, 4), font=("Segoe UI", max(8, font_size - 1)), borderwidth=1)
+        style.map("TNotebook.Tab",
+                  background=[("selected", accent), ("active", "#c4efff" if theme == "Light" else "#204765")],
+                  foreground=[("selected", "#ffffff"), ("active", foreground)])
+        style.configure("Horizontal.TProgressbar", troughcolor=field, background=accent,
+                        bordercolor=border, lightcolor=accent, darkcolor=accent, thickness=9)
 
     def _build_ui(self):
-        outer = ttk.Frame(self.root, padding=12)
+        outer = ttk.Frame(self.root, padding=(8, 8, 8, 8))
         outer.pack(fill="both", expand=True)
-        ttk.Label(
-            outer,
-            text=self.customization["header_text"] or APP_TITLE,
-            font=("Segoe UI", self.customization["font_size"] + 5, "bold"),
-        ).pack(anchor="w", pady=(0, 8))
+
+        # A dedicated host gives the fullscreen banner a reliable, measurable
+        # width. No decorative lower-corner picture is created in this UI.
+        self.banner_host = ttk.Frame(outer, style="TFrame")
+        self.banner_host.pack(fill="x", pady=(0, 8))
+        has_banner = self.customization.get("banner_enabled", True) and any((
+            self.banner_custom_source, self.banner_custom_fallback,
+            self.banner_default_source, self.banner_fullscreen_source,
+            self.banner_default_fallback, self.banner_fullscreen_fallback,
+        ))
+        if has_banner:
+            self.banner_label = tk.Label(
+                self.banner_host, image=self.banner_image, bd=0, highlightthickness=1,
+                highlightbackground=self.palette["border"], bg=self.palette["background"],
+                anchor="center",
+            )
+            self.banner_label.pack(fill="x")
+        else:
+            ttk.Label(
+                self.banner_host, text=self.customization["header_text"] or APP_TITLE,
+                font=("Segoe UI", self.customization["font_size"] + 5, "bold"),
+            ).pack(anchor="w", pady=(0, 8))
 
         notebook = ttk.Notebook(outer)
         notebook.pack(fill="both", expand=True)
-        # Keep the LCS PS2 tab visually consistent with the existing PS2 tab.
-        # Its patch action remains disabled until the PS2 target paths and payload are implemented.
-        ps2_tab = ttk.Frame(notebook, padding=14)
-        sa_ps2_tab = ttk.Frame(notebook, padding=14)
-        lcs_ps2_tab = ttk.Frame(notebook, padding=14)
-        vcs_psp_tab = ttk.Frame(notebook, padding=14)
-        lcs_psp_tab = ttk.Frame(notebook, padding=14)
-        pc_tab = ttk.Frame(notebook, padding=14)
-        vc_ps2_tab = ttk.Frame(notebook, padding=14)
-        iii_ps2_tab = ttk.Frame(notebook, padding=14)
-        sa_pc_tab = ttk.Frame(notebook, padding=14)
-        # Keep each game's platforms together in the tab strip: VCS, LCS,
-        # Vice City, then San Andreas.
+        # Keep all tab content and patch operations from the original project;
+        # only presentation, spacing, and artwork have been changed here.
+        ps2_tab = ttk.Frame(notebook, padding=(14, 14), style="Content.TFrame")
+        sa_ps2_tab = ttk.Frame(notebook, padding=(14, 14), style="Content.TFrame")
+        lcs_ps2_tab = ttk.Frame(notebook, padding=(14, 14), style="Content.TFrame")
+        vcs_psp_tab = ttk.Frame(notebook, padding=(14, 14), style="Content.TFrame")
+        lcs_psp_tab = ttk.Frame(notebook, padding=(14, 14), style="Content.TFrame")
+        pc_tab = ttk.Frame(notebook, padding=(14, 14), style="Content.TFrame")
+        vc_ps2_tab = ttk.Frame(notebook, padding=(14, 14), style="Content.TFrame")
+        sa_pc_tab = ttk.Frame(notebook, padding=(14, 14), style="Content.TFrame")
+        vc_de_tab = ttk.Frame(notebook, padding=(14, 14), style="Content.TFrame")
+        sa_de_tab = ttk.Frame(notebook, padding=(14, 14), style="Content.TFrame")
+        gta3_ps2_tab = ttk.Frame(notebook, padding=(14, 14), style="Content.TFrame")
+        # Keep each game's platforms together in the tab strip, matching the reference.
         tabs = {
+            "gta3_ps2": gta3_ps2_tab,
             "vcs_ps2": ps2_tab, "vcs_psp": vcs_psp_tab,
             "lcs_ps2": lcs_ps2_tab, "lcs_psp": lcs_psp_tab,
-            "vc_ps2": vc_ps2_tab, "iii_ps2": iii_ps2_tab, "vc_pc": pc_tab,
+            "vc_ps2": vc_ps2_tab, "vc_pc": pc_tab,
             "sa_ps2": sa_ps2_tab, "sa_pc": sa_pc_tab,
+            "vc_de": vc_de_tab, "sa_de": sa_de_tab,
         }
-        for key, tab in tabs.items():
+        # Apply the saved customizer order while keeping every game's frame
+        # mapped to its stable internal key. Unknown/duplicate keys are filtered
+        # by load_customization, and any new game tabs are appended by default.
+        for key in self.customization["tab_order"]:
+            tab = tabs.get(key)
+            if tab is None:
+                continue
             notebook.add(tab, text=self.customization["tab_labels"].get(key, DEFAULT_CUSTOMIZATION["tab_labels"][key]))
         for key, tab in tabs.items():
             if not self.customization["visible_tabs"].get(key, True):
                 notebook.tab(tab, state="hidden")
+
+        self._build_gta3_ps2_tab(gta3_ps2_tab)
         self._build_ps2_tab(ps2_tab)
         self._build_sa_ps2_tab(sa_ps2_tab)
         self._build_lcs_ps2_tab(lcs_ps2_tab)
         self._build_vc_ps2_tab(vc_ps2_tab)
-        self._build_iii_ps2_tab(iii_ps2_tab)
         self._build_vcs_psp_tab(vcs_psp_tab)
         self._build_lcs_psp_tab(lcs_psp_tab)
         self._build_pc_tab(pc_tab)
         self._build_sa_pc_tab(sa_pc_tab)
+        self._build_de_tab(vc_de_tab, "vc_de")
+        self._build_de_tab(sa_de_tab, "sa_de")
 
     def _build_ps2_tab(self, parent):
         ttk.Label(
             parent,
             text="GTA: Vice City (PS2). Replaces AMERICAN.GXT, VCPR.VB and FRONTEN2.TXD in a new ISO/CSO copy.",
-            wraplength=690,
+            wraplength=820,
         ).pack(anchor="w", pady=(0, 12))
 
         row1 = ttk.Frame(parent)
-        row1.pack(fill="x", pady=4)
+        row1.pack(fill="x", pady=(12, 10))
         ttk.Label(row1, text="Input ISO/CSO", width=14).pack(side="left")
         ttk.Entry(row1, textvariable=self.iso_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row1, text="Browse…", command=self._choose_iso).pack(side="left")
 
         row2 = ttk.Frame(parent)
-        row2.pack(fill="x", pady=4)
+        row2.pack(fill="x", pady=(12, 10))
         ttk.Label(row2, text="Output ISO/CSO", width=14).pack(side="left")
         ttk.Entry(row2, textvariable=self.out_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row2, text="Save as…", command=self._choose_output).pack(side="left")
 
         buttons = ttk.Frame(parent)
-        buttons.pack(fill="x", pady=(14, 8))
+        buttons.pack(fill="x", pady=(18, 10))
         self.patch_button = ttk.Button(buttons, text="Create Patched PS2 ISO", command=self._start_patch)
         self.patch_button.pack(side="left")
         missing_vcs_ps2 = [name for name in VCS_PS2_TARGET_PATHS
-                           if not local_game_asset_path(name, "VCS_PS2").is_file()
-                           or local_game_asset_path(name, "VCS_PS2").stat().st_size <= 0]
+                           if not asset_path_in_game_folder(name, "VCS_PS2").is_file()
+                           or asset_path_in_game_folder(name, "VCS_PS2").stat().st_size <= 0]
         if missing_vcs_ps2:
             self.patch_button.configure(state="disabled")
             self.status_var.set(
-                "VCS PS2 local assets missing: " + ", ".join(missing_vcs_ps2)
-                + ". Put all seven files in Assets\\VCS_PS2 beside the application, then restart it."
+                "Bundled VCS PS2 assets missing: " + ", ".join(missing_vcs_ps2)
+                + ". Add all seven files to Assets\\VCS_PS2 and rebuild the EXE."
             )
         ttk.Button(buttons, text="About / Safety", command=self._about).pack(side="left", padx=8)
 
         self.progress = ttk.Progressbar(parent, mode="indeterminate")
         self.progress.pack(fill="x", pady=(4, 8))
-        ttk.Label(parent, textvariable=self.status_var, wraplength=690).pack(anchor="w")
+        ttk.Label(parent, textvariable=self.status_var, wraplength=820).pack(anchor="w")
         ttk.Label(
             parent,
-            text="Uses local Assets/VCS_PS2 files: five language GXT files at the ISO root, VCPR.VB at AUDIO/MUSIC/VCPR.VB, and GAME.DTZ at PS2/GAME.DTZ. Supports ISO and CSO v1/v2; CSO v2 is experimental.",
-            foreground="#555555", wraplength=690,
+            text="Uses bundled Assets/VCS_PS2 files: five language GXT files at the ISO root, VCPR.VB at AUDIO/MUSIC/VCPR.VB, and GAME.DTZ at PS2/GAME.DTZ. Supports ISO and CSO v1/v2; CSO v2 is experimental.",
+            foreground="#588db2", wraplength=820,
         ).pack(anchor="w", pady=(12, 0))
 
     def _build_sa_ps2_tab(self, parent):
         ttk.Label(
             parent,
-            text="Experimental ISO workflow for GTA: San Andreas (PS2). Replaces four local radio/text assets in a new ISO/CSO copy.",
-            wraplength=690,
+            text="Experimental ISO workflow for GTA: San Andreas (PS2). Replaces four bundled radio/text assets in a new ISO/CSO copy.",
+            wraplength=820,
         ).pack(anchor="w", pady=(0, 12))
 
         row1 = ttk.Frame(parent)
-        row1.pack(fill="x", pady=4)
+        row1.pack(fill="x", pady=(12, 10))
         ttk.Label(row1, text="Input ISO/CSO", width=14).pack(side="left")
         ttk.Entry(row1, textvariable=self.sa_ps2_iso_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row1, text="Browse…", command=self._choose_sa_ps2_iso).pack(side="left")
 
         row2 = ttk.Frame(parent)
-        row2.pack(fill="x", pady=4)
+        row2.pack(fill="x", pady=(12, 10))
         ttk.Label(row2, text="Output ISO/CSO", width=14).pack(side="left")
         ttk.Entry(row2, textvariable=self.sa_ps2_out_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row2, text="Save as…", command=self._choose_sa_ps2_output).pack(side="left")
 
         buttons = ttk.Frame(parent)
-        buttons.pack(fill="x", pady=(14, 8))
+        buttons.pack(fill="x", pady=(18, 10))
         self.sa_ps2_patch_button = ttk.Button(buttons, text="Create Patched PS2 ISO", command=self._start_sa_ps2_patch)
         self.sa_ps2_patch_button.pack(side="left")
         missing = [name for name in SA_PS2_TARGET_PATHS
-                   if not local_game_asset_path(name, "SA_PS2").is_file()
-                   or local_game_asset_path(name, "SA_PS2").stat().st_size <= 0]
+                   if not asset_path_in_game_folder(name, "SA_PS2").is_file()
+                   or asset_path_in_game_folder(name, "SA_PS2").stat().st_size <= 0]
         if missing:
             self.sa_ps2_patch_button.configure(state="disabled")
             self.sa_ps2_status_var.set(
-                "SA PS2 local assets missing: " + ", ".join(missing)
-                + ". Put all four files in Assets\\SA_PS2 beside the application, then restart it."
+                "Bundled SA PS2 assets missing: " + ", ".join(missing)
+                + ". Add all four files to Assets\\SA_PS2 and rebuild the EXE."
             )
         ttk.Button(buttons, text="About / Safety", command=self._about_sa_ps2).pack(side="left", padx=8)
 
         self.sa_ps2_progress = ttk.Progressbar(parent, mode="indeterminate")
         self.sa_ps2_progress.pack(fill="x", pady=(4, 8))
-        ttk.Label(parent, textvariable=self.sa_ps2_status_var, wraplength=690).pack(anchor="w")
+        ttk.Label(parent, textvariable=self.sa_ps2_status_var, wraplength=820).pack(anchor="w")
         ttk.Label(
             parent,
-            text="Local Assets/SA_PS2 files: FRONTEN1.TXD → MODELS/FRONTEN1.TXD; AMERICAN.GXT → TEXT/AMERICAN.GXT; TK.PAK → AUDIO/STREAMS/TK.PAK; TRAKLKUP.DAT → AUDIO/CONFIG/TRAKLKUP.DAT. Supports ISO and CSO v1/v2 (v2 experimental).",
-            foreground="#555555", wraplength=690,
+            text="Bundled Assets/SA_PS2 files: FRONTEN1.TXD → MODELS/FRONTEN1.TXD; AMERICAN.GXT → TEXT/AMERICAN.GXT; TK.PAK → AUDIO/STREAMS/TK.PAK; TRAKLKUP.DAT → AUDIO/CONFIG/TRAKLKUP.DAT. Supports ISO and CSO v1/v2 (v2 experimental).",
+            foreground="#588db2", wraplength=820,
         ).pack(anchor="w", pady=(12, 0))
 
     def _choose_sa_ps2_iso(self):
@@ -2254,16 +2555,12 @@ class App:
             return
         iso_path = Path(iso_text).expanduser()
         out_path = Path(out_text).expanduser()
-        payloads = {name: local_game_asset_path(name, "SA_PS2") for name in SA_PS2_TARGET_PATHS}
+        payloads = {name: asset_path_in_game_folder(name, "SA_PS2") for name in SA_PS2_TARGET_PATHS}
         missing = [name for name, path in payloads.items() if not path.is_file() or path.stat().st_size <= 0]
         if missing:
-            messagebox.showwarning("Missing SA PS2 assets", "Put these local files in Assets\\SA_PS2 beside the application:\n\n" + "\n".join(missing), parent=self.root)
+            messagebox.showwarning("Missing SA PS2 assets", "Add these files to Assets\\SA_PS2 and rebuild the EXE:\n\n" + "\n".join(missing), parent=self.root)
             return
-        if out_path.exists() and not messagebox.askyesno(
-            "Overwrite existing output?",
-            f"This output file already exists:\n\n{out_path}\n\nReplace it with the newly patched image? The input image will remain untouched.",
-            parent=self.root,
-        ):
+        if out_path.exists() and not messagebox.askyesno("Overwrite existing output?", f"The output file already exists:\n{out_path}\n\nReplace it with the new patched image? The old file will be restored if patching fails.", parent=self.root):
             return
         if not messagebox.askyesno(
             "Confirm experimental patch",
@@ -2307,7 +2604,7 @@ class App:
     def _about_sa_ps2(self):
         messagebox.showinfo(
             "GTA San Andreas PS2 / Safety",
-            "The SA PS2 tab checks SYSTEM.CNF against recognized GTA: San Andreas PS2 serials and replaces four local files:\n\n"
+            "The SA PS2 tab checks SYSTEM.CNF against recognized GTA: San Andreas PS2 serials and replaces four bundled files:\n\n"
             "• Assets/SA_PS2/FRONTEN1.TXD → MODELS/FRONTEN1.TXD\n"
             "• Assets/SA_PS2/AMERICAN.GXT → TEXT/AMERICAN.GXT\n"
             "• Assets/SA_PS2/TK.PAK → AUDIO/STREAMS/TK.PAK\n"
@@ -2317,27 +2614,27 @@ class App:
         )
 
     def _build_vc_ps2_tab(self, parent):
-        """Build the VC PS2 patch tab using its three optional local payloads."""
+        """Build the VC PS2 patch tab using its three optional bundled payloads."""
         ttk.Label(
             parent,
             text="GTA: Vice City (PS2). Replaces the bundled radio, text, and game-data files in a new ISO/CSO copy.",
-            wraplength=690,
+            wraplength=820,
         ).pack(anchor="w", pady=(0, 12))
 
         row1 = ttk.Frame(parent)
-        row1.pack(fill="x", pady=4)
+        row1.pack(fill="x", pady=(12, 10))
         ttk.Label(row1, text="Input ISO/CSO", width=14).pack(side="left")
         ttk.Entry(row1, textvariable=self.vc_ps2_iso_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row1, text="Browse…", command=self._choose_vc_ps2_iso).pack(side="left")
 
         row2 = ttk.Frame(parent)
-        row2.pack(fill="x", pady=4)
+        row2.pack(fill="x", pady=(12, 10))
         ttk.Label(row2, text="Output ISO/CSO", width=14).pack(side="left")
         ttk.Entry(row2, textvariable=self.vc_ps2_out_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row2, text="Save as…", command=self._choose_vc_ps2_output).pack(side="left")
 
         buttons = ttk.Frame(parent)
-        buttons.pack(fill="x", pady=(14, 8))
+        buttons.pack(fill="x", pady=(18, 10))
         self.vc_ps2_patch_button = ttk.Button(
             buttons, text="Create Patched PS2 ISO", command=self._start_vc_ps2_patch,
         )
@@ -2355,11 +2652,11 @@ class App:
 
         self.vc_ps2_progress = ttk.Progressbar(parent, mode="indeterminate")
         self.vc_ps2_progress.pack(fill="x", pady=(4, 8))
-        ttk.Label(parent, textvariable=self.vc_ps2_status_var, wraplength=690).pack(anchor="w")
+        ttk.Label(parent, textvariable=self.vc_ps2_status_var, wraplength=820).pack(anchor="w")
         ttk.Label(
             parent,
             text="Supports ISO/CSO v1 and experimental v2. Targets: AMERICAN.GXT → TEXT/AMERICAN.GXT; VCPR.VB → AUDIO/MUSIC/VCPR.VB; FRONTEN2.TXD → MODELS/FRONTEN2.TXD. Larger replacement files are relocated to new ISO sectors; the source image is never modified.",
-            foreground="#555555", wraplength=690,
+            foreground="#588db2", wraplength=820,
         ).pack(anchor="w", pady=(12, 0))
 
     def _choose_vc_ps2_iso(self):
@@ -2397,11 +2694,7 @@ class App:
         if missing:
             messagebox.showwarning("Missing VC PS2 assets", "Add these files to Assets/VC_PS2 and rebuild the EXE:\n\n" + "\n".join(missing), parent=self.root)
             return
-        if out_path.exists() and not messagebox.askyesno(
-            "Overwrite existing output?",
-            f"This output file already exists:\n\n{out_path}\n\nReplace it with the newly patched image? The input image will remain untouched.",
-            parent=self.root,
-        ):
+        if out_path.exists() and not messagebox.askyesno("Overwrite existing output?", f"The output file already exists:\n{out_path}\n\nReplace it with the new patched image? The old file will be restored if patching fails.", parent=self.root):
             return
         if not messagebox.askyesno(
             "Confirm experimental patch",
@@ -2441,7 +2734,6 @@ class App:
         except queue.Empty:
             pass
         self.root.after(100, self._poll_vc_ps2_events)
-        self.root.after(100, self._poll_iii_ps2_events)
 
     def _about_vc_ps2(self):
         messagebox.showinfo(
@@ -2455,167 +2747,28 @@ class App:
         )
 
 
-    def _build_iii_ps2_tab(self, parent):
-        """Build the GTA III PS2 patch tab using its three optional local payloads."""
-        ttk.Label(
-            parent,
-            text="GTA III (PS2). Replaces AMERICAN.GXT, KJAH.VB, and FRONTEND.TXD in a new ISO/CSO copy.",
-            wraplength=690,
-        ).pack(anchor="w", pady=(0, 12))
-
-        row1 = ttk.Frame(parent)
-        row1.pack(fill="x", pady=4)
-        ttk.Label(row1, text="Input ISO/CSO", width=14).pack(side="left")
-        ttk.Entry(row1, textvariable=self.iii_ps2_iso_var).pack(side="left", fill="x", expand=True, padx=6)
-        ttk.Button(row1, text="Browse…", command=self._choose_iii_ps2_iso).pack(side="left")
-
-        row2 = ttk.Frame(parent)
-        row2.pack(fill="x", pady=4)
-        ttk.Label(row2, text="Output ISO/CSO", width=14).pack(side="left")
-        ttk.Entry(row2, textvariable=self.iii_ps2_out_var).pack(side="left", fill="x", expand=True, padx=6)
-        ttk.Button(row2, text="Save as…", command=self._choose_iii_ps2_output).pack(side="left")
-
-        buttons = ttk.Frame(parent)
-        buttons.pack(fill="x", pady=(14, 8))
-        self.iii_ps2_patch_button = ttk.Button(
-            buttons, text="Create Patched PS2 ISO", command=self._start_iii_ps2_patch,
-        )
-        self.iii_ps2_patch_button.pack(side="left")
-        missing = [name for name in III_PS2_TARGET_PATHS
-                   if not asset_path_in_game_folder(name, "III_PS2").is_file()
-                   or asset_path_in_game_folder(name, "III_PS2").stat().st_size <= 0]
-        if missing:
-            self.iii_ps2_patch_button.configure(state="disabled")
-            self.iii_ps2_status_var.set(
-                "Required GTA III PS2 assets are missing: " + ", ".join(missing)
-                + ". Put all three in Assets\\III_PS2 and rebuild the EXE."
-            )
-        ttk.Button(buttons, text="About / Safety", command=self._about_iii_ps2).pack(side="left", padx=8)
-
-        self.iii_ps2_progress = ttk.Progressbar(parent, mode="indeterminate")
-        self.iii_ps2_progress.pack(fill="x", pady=(4, 8))
-        ttk.Label(parent, textvariable=self.iii_ps2_status_var, wraplength=690).pack(anchor="w")
-        ttk.Label(
-            parent,
-            text="Supports ISO/CSO v1 and experimental v2. Targets: AMERICAN.GXT → TEXT/AMERICAN.GXT; KJAH.VB → AUDIO/MUSIC/KJAH.VB; FRONTEND.TXD → MODELS/FRONTEND.TXD. Larger replacement files are relocated to new ISO sectors; the source image is never modified.",
-            foreground="#555555", wraplength=690,
-        ).pack(anchor="w", pady=(12, 0))
-
-    def _choose_iii_ps2_iso(self):
-        path = filedialog.askopenfilename(
-            title="Select GTA III (PS2) ISO",
-            filetypes=[("ISO/CSO disc images", "*.iso *.cso *.bin *.img"), ("All files", "*.*")],
-        )
-        if path:
-            self.iii_ps2_iso_var.set(path)
-            p = Path(path)
-            ext = ".cso" if p.suffix.casefold() == ".cso" else ".iso"
-            if not self.iii_ps2_out_var.get():
-                self.iii_ps2_out_var.set(str(p.with_name(p.stem + "_HOLOLIVE_RADIO_PATCHED" + ext)))
-            self.iii_ps2_status_var.set("Input image selected. Choose an output path and create the patched copy when all three Assets/III_PS2 files are present.")
-
-    def _choose_iii_ps2_output(self):
-        initial = self.iii_ps2_out_var.get() or "III_PS2_HOLOLIVE_RADIO_PATCHED.iso"
-        path = filedialog.asksaveasfilename(
-            title="Save patched ISO/CSO as", initialfile=Path(initial).name,
-            defaultextension=".iso", filetypes=[("ISO image", "*.iso"), ("CSO image", "*.cso"), ("All files", "*.*")],
-        )
-        if path:
-            self.iii_ps2_out_var.set(path)
-
-    def _start_iii_ps2_patch(self):
-        iso_text = self.iii_ps2_iso_var.get().strip()
-        out_text = self.iii_ps2_out_var.get().strip()
-        if not iso_text or not out_text:
-            messagebox.showwarning("Choose files", "Choose an input ISO/CSO and an output filename first.", parent=self.root)
-            return
-        iso_path = Path(iso_text).expanduser()
-        out_path = Path(out_text).expanduser()
-        payloads = {name: asset_path_in_game_folder(name, "III_PS2") for name in III_PS2_TARGET_PATHS}
-        missing = [name for name, path in payloads.items() if not path.is_file() or path.stat().st_size <= 0]
-        if missing:
-            messagebox.showwarning("Missing GTA III PS2 assets", "Add these files to Assets/III_PS2 and rebuild the EXE:\n\n" + "\n".join(missing), parent=self.root)
-            return
-        if out_path.exists() and not messagebox.askyesno(
-            "Overwrite existing output?",
-            f"This output file already exists:\n\n{out_path}\n\nReplace it with the newly patched image? The input image will remain untouched.",
-            parent=self.root,
-        ):
-            return
-        if not messagebox.askyesno(
-            "Confirm experimental patch",
-            "Create a new patched GTA III (PS2) ISO/CSO?\n\nThe input must identify as a recognized GTA III PS2 release and contain all three target paths. The original image will not be modified. Larger replacement files may be relocated to new ISO sectors. This patch is experimental and has not been verified in-game.",
-            parent=self.root,
-        ):
-            return
-        self.iii_ps2_patch_button.configure(state="disabled")
-        self.iii_ps2_progress.start(12)
-        self.iii_ps2_status_var.set("Starting GTA III PS2 ISO check…")
-        def status(msg: str):
-            self.iii_ps2_events.put(("status", msg))
-        def worker():
-            try:
-                result = check_iii_ps2_image_and_patch(iso_path, out_path, payloads, status)
-            except Exception as exc:
-                self.iii_ps2_events.put(("error", f"{exc}\n\n{traceback.format_exc()}"))
-            else:
-                self.iii_ps2_events.put(("done", result))
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _poll_iii_ps2_events(self):
-        try:
-            while True:
-                kind, value = self.iii_ps2_events.get_nowait()
-                if kind == "status":
-                    self.iii_ps2_status_var.set(str(value))
-                else:
-                    self.iii_ps2_progress.stop()
-                    self.iii_ps2_patch_button.configure(state="normal")
-                    if kind == "done":
-                        self.iii_ps2_status_var.set("GTA III PS2 ISO patch completed successfully.")
-                        messagebox.showinfo("GTA III PS2 patch complete", str(value), parent=self.root)
-                    else:
-                        self.iii_ps2_status_var.set("GTA III PS2 patch stopped; no completed output was kept.")
-                        messagebox.showerror("Could not patch GTA III PS2 ISO", str(value), parent=self.root)
-        except queue.Empty:
-            pass
-        self.root.after(100, self._poll_iii_ps2_events)
-
-    def _about_iii_ps2(self):
-        messagebox.showinfo(
-            "GTA III PS2 / Safety",
-            "The GTA III PS2 tab verifies SYSTEM.CNF against recognized GTA III PS2 serials, then replaces these optional bundled files:\n\n"
-            "• Assets\\III_PS2\\AMERICAN.GXT → TEXT/AMERICAN.GXT\n"
-            "• Assets\\III_PS2\\KJAH.VB → AUDIO/MUSIC/KJAH.VB\n"
-            "• Assets\\III_PS2\\FRONTEND.TXD → MODELS/FRONTEND.TXD\n\n"
-            "All three files must be present to enable patching. The app creates a new ISO/CSO and never overwrites the source. Larger replacement files are relocated to new ISO sectors and directory entries are updated. This patch is experimental and has not been verified in-game; test in PCSX2 first.",
-            parent=self.root,
-        )
-
-
-
     def _build_lcs_ps2_tab(self, parent):
-        """Build the LCS PS2 patch tab using its three optional local payloads."""
+        """Build the LCS PS2 patch tab using its three optional bundled payloads."""
         ttk.Label(
             parent,
             text="GTA: Liberty City Stories (PS2). Replaces the bundled radio, text, and game-data files in a new ISO/CSO copy.",
-            wraplength=690,
+            wraplength=820,
         ).pack(anchor="w", pady=(0, 12))
 
         row1 = ttk.Frame(parent)
-        row1.pack(fill="x", pady=4)
+        row1.pack(fill="x", pady=(12, 10))
         ttk.Label(row1, text="Input ISO/CSO", width=14).pack(side="left")
         ttk.Entry(row1, textvariable=self.lcs_ps2_iso_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row1, text="Browse…", command=self._choose_lcs_ps2_iso).pack(side="left")
 
         row2 = ttk.Frame(parent)
-        row2.pack(fill="x", pady=4)
+        row2.pack(fill="x", pady=(12, 10))
         ttk.Label(row2, text="Output ISO/CSO", width=14).pack(side="left")
         ttk.Entry(row2, textvariable=self.lcs_ps2_out_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row2, text="Save as…", command=self._choose_lcs_ps2_output).pack(side="left")
 
         buttons = ttk.Frame(parent)
-        buttons.pack(fill="x", pady=(14, 8))
+        buttons.pack(fill="x", pady=(18, 10))
         self.lcs_ps2_patch_button = ttk.Button(
             buttons, text="Create Patched PS2 ISO", command=self._start_lcs_ps2_patch,
         )
@@ -2633,11 +2786,11 @@ class App:
 
         self.lcs_ps2_progress = ttk.Progressbar(parent, mode="indeterminate")
         self.lcs_ps2_progress.pack(fill="x", pady=(4, 8))
-        ttk.Label(parent, textvariable=self.lcs_ps2_status_var, wraplength=690).pack(anchor="w")
+        ttk.Label(parent, textvariable=self.lcs_ps2_status_var, wraplength=820).pack(anchor="w")
         ttk.Label(
             parent,
             text="Supports ISO/CSO v1 and experimental v2. Targets: KJAH.VB → AUDIO/MUSIC/KJAH.VB; ENGLISH.GXT → TEXT/ENGLISH.GXT; GAME.DTZ → CHK/PS2/GAME.DTZ. Larger replacement files are relocated to new ISO sectors; the source image is never modified.",
-            foreground="#555555", wraplength=690,
+            foreground="#588db2", wraplength=820,
         ).pack(anchor="w", pady=(12, 0))
 
     def _choose_lcs_ps2_iso(self):
@@ -2675,11 +2828,7 @@ class App:
         if missing:
             messagebox.showwarning("Missing LCS PS2 assets", "Add these files to Assets/LCS_PS2 and rebuild the EXE:\n\n" + "\n".join(missing), parent=self.root)
             return
-        if out_path.exists() and not messagebox.askyesno(
-            "Overwrite existing output?",
-            f"This output file already exists:\n\n{out_path}\n\nReplace it with the newly patched image? The input image will remain untouched.",
-            parent=self.root,
-        ):
+        if out_path.exists() and not messagebox.askyesno("Overwrite existing output?", f"The output file already exists:\n{out_path}\n\nReplace it with the new patched image? The old file will be restored if patching fails.", parent=self.root):
             return
         if not messagebox.askyesno(
             "Confirm experimental patch",
@@ -2731,32 +2880,164 @@ class App:
             parent=self.root,
         )
 
-    def _build_vcs_psp_tab(self, parent):
+    def _build_gta3_ps2_tab(self, parent):
+        """Build the GTA III PS2 patch tab using its three optional bundled payloads."""
         ttk.Label(
             parent,
-            text="GTA: Vice City Stories (PSP). The patch action requires three optional bundled replacement files.",
-            wraplength=690,
+            text="GTA III (PS2). Replaces the bundled radio, text, and frontend texture files in a new ISO/CSO copy.",
+            wraplength=820,
         ).pack(anchor="w", pady=(0, 12))
 
         row1 = ttk.Frame(parent)
-        row1.pack(fill="x", pady=4)
+        row1.pack(fill="x", pady=(12, 10))
+        ttk.Label(row1, text="Input ISO/CSO", width=14).pack(side="left")
+        ttk.Entry(row1, textvariable=self.gta3_ps2_iso_var).pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Button(row1, text="Browse…", command=self._choose_gta3_ps2_iso).pack(side="left")
+
+        row2 = ttk.Frame(parent)
+        row2.pack(fill="x", pady=(12, 10))
+        ttk.Label(row2, text="Output ISO/CSO", width=14).pack(side="left")
+        ttk.Entry(row2, textvariable=self.gta3_ps2_out_var).pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Button(row2, text="Save as…", command=self._choose_gta3_ps2_output).pack(side="left")
+
+        buttons = ttk.Frame(parent)
+        buttons.pack(fill="x", pady=(18, 10))
+        self.gta3_ps2_patch_button = ttk.Button(
+            buttons, text="Create Patched PS2 ISO", command=self._start_gta3_ps2_patch,
+        )
+        self.gta3_ps2_patch_button.pack(side="left")
+        missing = [name for name in III_PS2_TARGET_PATHS
+                   if not asset_path_in_game_folder(name, "III_PS2").is_file()
+                   or asset_path_in_game_folder(name, "III_PS2").stat().st_size <= 0]
+        if missing:
+            self.gta3_ps2_patch_button.configure(state="disabled")
+            self.gta3_ps2_status_var.set(
+                "Required GTA III PS2 assets are missing: " + ", ".join(missing)
+                + ". Put all three in Assets\\III_PS2 and rebuild the EXE."
+            )
+        ttk.Button(buttons, text="About / Safety", command=self._about_gta3_ps2).pack(side="left", padx=8)
+
+        self.gta3_ps2_progress = ttk.Progressbar(parent, mode="indeterminate")
+        self.gta3_ps2_progress.pack(fill="x", pady=(4, 8))
+        ttk.Label(parent, textvariable=self.gta3_ps2_status_var, wraplength=820).pack(anchor="w")
+        ttk.Label(
+            parent,
+            text="Supports ISO/CSO v1 and experimental v2. Targets: AMERICAN.GXT → TEXT/AMERICAN.GXT; FRONTEND.TXD → MODELS/FRONTEND.TXD; KJAH.VB → AUDIO/MUSIC/KJAH.VB. Larger replacement files are relocated to new ISO sectors; the source image is never modified.",
+            foreground="#588db2", wraplength=820,
+        ).pack(anchor="w", pady=(12, 0))
+
+    def _choose_gta3_ps2_iso(self):
+        path = filedialog.askopenfilename(
+            title="Select GTA III (PS2) ISO",
+            filetypes=[("ISO/CSO disc images", "*.iso *.cso *.bin *.img"), ("All files", "*.*")],
+        )
+        if path:
+            self.gta3_ps2_iso_var.set(path)
+            p = Path(path)
+            ext = ".cso" if p.suffix.casefold() == ".cso" else ".iso"
+            if not self.gta3_ps2_out_var.get():
+                self.gta3_ps2_out_var.set(str(p.with_name(p.stem + "_HOLOLIVE_RADIO_PATCHED" + ext)))
+            self.gta3_ps2_status_var.set("Input image selected. Choose an output path and create the patched copy when all three Assets/III_PS2 files are present.")
+
+    def _choose_gta3_ps2_output(self):
+        initial = self.gta3_ps2_out_var.get() or "GTA_III_PS2_HOLOLIVE_RADIO_PATCHED.iso"
+        path = filedialog.asksaveasfilename(
+            title="Save patched ISO/CSO as", initialfile=Path(initial).name,
+            defaultextension=".iso", filetypes=[("ISO image", "*.iso"), ("CSO image", "*.cso"), ("All files", "*.*")],
+        )
+        if path:
+            self.gta3_ps2_out_var.set(path)
+
+    def _start_gta3_ps2_patch(self):
+        iso_text = self.gta3_ps2_iso_var.get().strip()
+        out_text = self.gta3_ps2_out_var.get().strip()
+        if not iso_text or not out_text:
+            messagebox.showwarning("Choose files", "Choose an input ISO/CSO and an output filename first.", parent=self.root)
+            return
+        iso_path = Path(iso_text).expanduser()
+        out_path = Path(out_text).expanduser()
+        payloads = {name: asset_path_in_game_folder(name, "III_PS2") for name in III_PS2_TARGET_PATHS}
+        missing = [name for name, path in payloads.items() if not path.is_file() or path.stat().st_size <= 0]
+        if missing:
+            messagebox.showwarning("Missing GTA III PS2 assets", "Add these files to Assets/III_PS2 and rebuild the EXE:\n\n" + "\n".join(missing), parent=self.root)
+            return
+        if out_path.exists() and not messagebox.askyesno("Overwrite existing output?", f"The output file already exists:\n{out_path}\n\nReplace it with the new patched image? The old file will be restored if patching fails.", parent=self.root):
+            return
+        if not messagebox.askyesno(
+            "Confirm experimental patch",
+            "Create a new patched GTA III (PS2) ISO/CSO?\n\nThe input must identify as a recognized GTA III PS2 release and contain all three target paths. The original image will not be modified. Larger replacement files may be relocated to new ISO sectors. This patch is experimental and has not been verified in-game.",
+            parent=self.root,
+        ):
+            return
+        self.gta3_ps2_patch_button.configure(state="disabled")
+        self.gta3_ps2_progress.start(12)
+        self.gta3_ps2_status_var.set("Starting GTA III PS2 ISO check…")
+        def status(msg: str):
+            self.gta3_ps2_events.put(("status", msg))
+        def worker():
+            try:
+                result = check_gta3_ps2_image_and_patch(iso_path, out_path, payloads, status)
+            except Exception as exc:
+                self.gta3_ps2_events.put(("error", f"{exc}\n\n{traceback.format_exc()}"))
+            else:
+                self.gta3_ps2_events.put(("done", result))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _poll_gta3_ps2_events(self):
+        try:
+            while True:
+                kind, value = self.gta3_ps2_events.get_nowait()
+                if kind == "status":
+                    self.gta3_ps2_status_var.set(str(value))
+                else:
+                    self.gta3_ps2_progress.stop()
+                    self.gta3_ps2_patch_button.configure(state="normal")
+                    if kind == "done":
+                        self.gta3_ps2_status_var.set("GTA III PS2 ISO patch completed successfully.")
+                        messagebox.showinfo("GTA III PS2 patch complete", str(value), parent=self.root)
+                    else:
+                        self.gta3_ps2_status_var.set("GTA III PS2 patch stopped; no completed output was kept.")
+                        messagebox.showerror("Could not patch GTA III PS2 ISO", str(value), parent=self.root)
+        except queue.Empty:
+            pass
+        self.root.after(100, self._poll_gta3_ps2_events)
+
+    def _about_gta3_ps2(self):
+        messagebox.showinfo(
+            "GTA III PS2 / Safety",
+            "The GTA III PS2 tab verifies SYSTEM.CNF against recognized GTA III PS2 serials, then replaces these bundled files:\n\n"
+            "• Assets\\III_PS2\\AMERICAN.GXT → TEXT/AMERICAN.GXT\n"
+            "• Assets\\III_PS2\\FRONTEND.TXD → MODELS/FRONTEND.TXD\n"
+            "• Assets\\III_PS2\\KJAH.VB → AUDIO/MUSIC/KJAH.VB\n\n"
+            "All three files must be present to enable patching. KJAH.VB should be placed in Assets/III_PS2 before building; the build script bundles it automatically. The app creates a new ISO/CSO and never overwrites the source. Larger replacement files may be relocated to new ISO sectors and directory entries are updated. This patch is experimental and has not been verified in-game; test in PCSX2 first.",
+            parent=self.root,
+        )
+    def _build_vcs_psp_tab(self, parent):
+        ttk.Label(
+            parent,
+            text="GTA: Vice City Stories (PSP). The patch action requires seven optional bundled replacement files.",
+            wraplength=820,
+        ).pack(anchor="w", pady=(0, 12))
+
+        row1 = ttk.Frame(parent)
+        row1.pack(fill="x", pady=(12, 10))
         ttk.Label(row1, text="Input ISO/CSO", width=14).pack(side="left")
         ttk.Entry(row1, textvariable=self.psp_iso_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row1, text="Browse…", command=self._choose_psp_iso).pack(side="left")
 
         row2 = ttk.Frame(parent)
-        row2.pack(fill="x", pady=4)
+        row2.pack(fill="x", pady=(12, 10))
         ttk.Label(row2, text="Output ISO/CSO", width=14).pack(side="left")
         ttk.Entry(row2, textvariable=self.psp_out_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row2, text="Save as…", command=self._choose_psp_output).pack(side="left")
 
         buttons = ttk.Frame(parent)
-        buttons.pack(fill="x", pady=(14, 8))
+        buttons.pack(fill="x", pady=(18, 10))
         self.psp_patch_button = ttk.Button(buttons, text="Create Patched PSP ISO", command=self._start_psp_patch)
         self.psp_patch_button.pack(side="left")
         missing_psp_assets = [
             name for name in PSP_TARGET_PATHS
-            if not asset_path(name).is_file() or asset_path(name).stat().st_size <= 0
+            if not asset_path_in_game_folder(name, "VCS_PSP").is_file() or asset_path_in_game_folder(name, "VCS_PSP").stat().st_size <= 0
         ]
         if missing_psp_assets:
             self.psp_patch_button.configure(state="disabled")
@@ -2768,34 +3049,34 @@ class App:
 
         self.psp_progress = ttk.Progressbar(parent, mode="indeterminate")
         self.psp_progress.pack(fill="x", pady=(4, 8))
-        ttk.Label(parent, textvariable=self.psp_status_var, wraplength=690).pack(anchor="w")
+        ttk.Label(parent, textvariable=self.psp_status_var, wraplength=820).pack(anchor="w")
         ttk.Label(
             parent,
             text="Supports ISO and CSO v1/v2 images with a 2048-byte-sector ISO9660 filesystem (CSO v2 is experimental). Larger replacement files are relocated to new ISO sectors; the original ISO is not modified.",
-            foreground="#555555", wraplength=690,
+            foreground="#588db2", wraplength=820,
         ).pack(anchor="w", pady=(12, 0))
 
     def _build_lcs_psp_tab(self, parent):
         ttk.Label(
             parent,
-            text="GTA: Liberty City Stories (PSP). The patch action requires three optional bundled replacement files.",
-            wraplength=690,
+            text="GTA: Liberty City Stories (PSP). The patch action requires seven optional bundled replacement files.",
+            wraplength=820,
         ).pack(anchor="w", pady=(0, 12))
 
         row1 = ttk.Frame(parent)
-        row1.pack(fill="x", pady=4)
+        row1.pack(fill="x", pady=(12, 10))
         ttk.Label(row1, text="Input ISO/CSO", width=14).pack(side="left")
         ttk.Entry(row1, textvariable=self.lcs_iso_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row1, text="Browse…", command=self._choose_lcs_iso).pack(side="left")
 
         row2 = ttk.Frame(parent)
-        row2.pack(fill="x", pady=4)
+        row2.pack(fill="x", pady=(12, 10))
         ttk.Label(row2, text="Output ISO/CSO", width=14).pack(side="left")
         ttk.Entry(row2, textvariable=self.lcs_out_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row2, text="Save as…", command=self._choose_lcs_output).pack(side="left")
 
         buttons = ttk.Frame(parent)
-        buttons.pack(fill="x", pady=(14, 8))
+        buttons.pack(fill="x", pady=(18, 10))
         self.lcs_patch_button = ttk.Button(buttons, text="Create Patched LCS PSP ISO", command=self._start_lcs_patch)
         self.lcs_patch_button.pack(side="left")
         missing_lcs_assets = [
@@ -2807,28 +3088,28 @@ class App:
             self.lcs_patch_button.configure(state="disabled")
             self.lcs_status_var.set(
                 "Required LCS PSP assets are missing: " + ", ".join(missing_lcs_assets) +
-                ". Rebuild with all three files in Assets\\LCS_PSP."
+                ". Rebuild with all seven files in Assets\\LCS_PSP."
             )
         ttk.Button(buttons, text="About / Safety", command=self._about_lcs_psp).pack(side="left", padx=8)
 
         self.lcs_progress = ttk.Progressbar(parent, mode="indeterminate")
         self.lcs_progress.pack(fill="x", pady=(4, 8))
-        ttk.Label(parent, textvariable=self.lcs_status_var, wraplength=690).pack(anchor="w")
+        ttk.Label(parent, textvariable=self.lcs_status_var, wraplength=820).pack(anchor="w")
         ttk.Label(
             parent,
             text="Supports ISO and CSO v1/v2 images with a 2048-byte-sector ISO9660 filesystem (CSO v2 is experimental). Larger replacement files are relocated to new ISO sectors; the original ISO is not modified.",
-            foreground="#555555", wraplength=690,
+            foreground="#588db2", wraplength=820,
         ).pack(anchor="w", pady=(12, 0))
 
     def _build_pc_tab(self, parent):
         ttk.Label(
             parent,
             text="Install optional bundled Hololive radio files into your classic GTA: Vice City PC installation. Choose the folder containing gta-vc.exe, text, models and audio.",
-            wraplength=690,
+            wraplength=820,
         ).pack(anchor="w", pady=(0, 12))
 
         root_row = ttk.Frame(parent)
-        root_row.pack(fill="x", pady=4)
+        root_row.pack(fill="x", pady=(12, 10))
         ttk.Label(root_row, text="PC install folder", width=16).pack(side="left")
         ttk.Entry(root_row, textvariable=self.pc_dir_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(root_row, text="Locate…", command=self._choose_pc_dir).pack(side="left")
@@ -2836,13 +3117,13 @@ class App:
         ttk.Label(
             parent,
             text="Built-in files: american.gxt → text/american.gxt   •   fronten2.txd → models/fronten2.txd   •   VCPR.adf → Audio/VCPR.adf",
-            wraplength=690, foreground="#555555",
+            wraplength=820, foreground="#588db2",
         ).pack(anchor="w", pady=(12, 8))
 
         self.pc_install_button = ttk.Button(parent, text="Install PC Files", command=self._start_pc_install)
         self.pc_install_button.pack(anchor="w", pady=(8, 8))
         ttk.Button(parent, text="About / Safety", command=self._about_pc).pack(anchor="w")
-        ttk.Label(parent, textvariable=self.pc_status_var, wraplength=690).pack(anchor="w", pady=(10, 0))
+        ttk.Label(parent, textvariable=self.pc_status_var, wraplength=820).pack(anchor="w", pady=(10, 0))
 
         missing = [name for name in ("american.gxt", "fronten2.txd", "VCPR.adf")
                    if not asset_path_in_game_folder(name, "VC_PC").is_file()
@@ -2858,11 +3139,11 @@ class App:
         ttk.Label(
             parent,
             text="Install optional bundled Hololive Radio files into your classic GTA: San Andreas PC Installation. Choose the main game folder containing gta_sa.exe, audio, models and text.",
-            wraplength=690,
+            wraplength=820,
         ).pack(anchor="w", pady=(0, 12))
 
         root_row = ttk.Frame(parent)
-        root_row.pack(fill="x", pady=4)
+        root_row.pack(fill="x", pady=(12, 10))
         ttk.Label(root_row, text="PC install folder", width=16).pack(side="left")
         ttk.Entry(root_row, textvariable=self.sa_pc_dir_var).pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(root_row, text="Locate…", command=self._choose_sa_pc_dir).pack(side="left")
@@ -2870,13 +3151,13 @@ class App:
         ttk.Label(
             parent,
             text="Built-in files: TK → audio/streams/TK   •   TrakLkup.dat → audio/CONFIG/TrakLkup.dat   •   fronten1.txd → models/fronten1.txd   •   american.gxt → text/american.gxt",
-            wraplength=690, foreground="#555555",
+            wraplength=820, foreground="#588db2",
         ).pack(anchor="w", pady=(12, 8))
 
         self.sa_pc_install_button = ttk.Button(parent, text="Install PC Files", command=self._start_sa_pc_install)
         self.sa_pc_install_button.pack(anchor="w", pady=(8, 8))
         ttk.Button(parent, text="About / Safety", command=self._about_sa_pc).pack(anchor="w")
-        ttk.Label(parent, textvariable=self.sa_pc_status_var, wraplength=690).pack(anchor="w", pady=(10, 0))
+        ttk.Label(parent, textvariable=self.sa_pc_status_var, wraplength=820).pack(anchor="w", pady=(10, 0))
 
         missing = [name for name in ("TK", "TrakLkup.dat", "fronten1.txd", "american.gxt")
                    if not asset_path_in_game_folder(name, "SA_PC").is_file()
@@ -2887,6 +3168,116 @@ class App:
                 "Built-in San Andreas PC file(s) missing: " + ", ".join(missing)
                 + ". Put all four in Assets/SA_PC and rebuild the EXE."
             )
+
+    def _build_de_tab(self, parent, key):
+        """Create a bundled .pak installer for one Definitive Edition game."""
+        config = DE_INSTALL_TARGETS[key]
+        display = config["display"]
+        asset_folder = config["asset_folder"]
+        ttk.Label(
+            parent,
+            text=f"Install the bundled Hololive Radio .pak into {display}. Select the game's root folder containing Gameface/Content/Paks.",
+            wraplength=820,
+        ).pack(anchor="w", pady=(0, 12))
+
+        row = ttk.Frame(parent)
+        row.pack(fill="x", pady=(12, 10))
+        ttk.Label(row, text="Game install folder", width=18).pack(side="left")
+        ttk.Entry(row, textvariable=self.de_dir_vars[key]).pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Button(row, text="Locate…", command=lambda k=key: self._choose_de_dir(k)).pack(side="left")
+
+        ttk.Label(
+            parent,
+            text=f"Bundled payload: Assets/{asset_folder}/{DE_PAK_FILENAME} → Gameface/Content/Paks/~mods/{DE_PAK_FILENAME}",
+            wraplength=820, foreground="#588db2",
+        ).pack(anchor="w", pady=(12, 8))
+
+        button = ttk.Button(parent, text="Install Hololive Radio .pak", command=lambda k=key: self._start_de_install(k))
+        button.pack(anchor="w", pady=(8, 8))
+        self.de_install_buttons[key] = button
+        ttk.Button(parent, text="About / Safety", command=lambda k=key: self._about_de(k)).pack(anchor="w")
+        ttk.Label(parent, textvariable=self.de_status_vars[key], wraplength=820).pack(anchor="w", pady=(10, 0))
+
+        payload = asset_path_in_game_folder(DE_PAK_FILENAME, asset_folder)
+        if not payload.is_file() or payload.stat().st_size <= 0:
+            button.configure(state="disabled")
+            self.de_status_vars[key].set(
+                f"Bundled payload missing: {DE_PAK_FILENAME}. Add it to Assets/{asset_folder} on the build PC and rebuild the EXE."
+            )
+
+    def _choose_de_dir(self, key):
+        config = DE_INSTALL_TARGETS[key]
+        path = filedialog.askdirectory(title=f"Locate {config['display']} installation", mustexist=True)
+        if path:
+            self.de_dir_vars[key].set(path)
+            self.de_status_vars[key].set("Game folder selected. Click Install Hololive Radio .pak to continue.")
+
+    def _about_de(self, key):
+        config = DE_INSTALL_TARGETS[key]
+        messagebox.showinfo(
+            f"{config['display']} / Safety",
+            f"This tab installs the bundled {DE_PAK_FILENAME} file into {config['display']}:\n\n"
+            f"Source: Assets/{config['asset_folder']}/{DE_PAK_FILENAME}\n"
+            f"Destination: Gameface/Content/Paks/~mods/{DE_PAK_FILENAME}\n\n"
+            "The installer checks for the selected game's Gameface/Content/Paks folders and creates ~mods if needed. If the destination file already exists, it is backed up inside the game folder before replacement. Only select the matching game's root directory, and back up game files before modding.",
+            parent=self.root,
+        )
+
+    def _start_de_install(self, key):
+        config = DE_INSTALL_TARGETS[key]
+        game_text = self.de_dir_vars[key].get().strip()
+        if not game_text:
+            messagebox.showwarning(
+                "Choose installation folder",
+                f"Click Locate… and choose the root folder of {config['display']} first.", parent=self.root,
+            )
+            return
+        payload = asset_path_in_game_folder(DE_PAK_FILENAME, config["asset_folder"])
+        if not payload.is_file() or payload.stat().st_size <= 0:
+            messagebox.showerror(
+                "Required Definitive Edition payload missing",
+                f"This build is missing {DE_PAK_FILENAME}. Add it to Assets/{config['asset_folder']} on the build PC, then rebuild the EXE.",
+                parent=self.root,
+            )
+            self.de_status_vars[key].set("Installation stopped; bundled .pak is missing.")
+            return
+        root = Path(game_text).expanduser().resolve()
+        relative = config["relative_path"]
+        try:
+            paks = _find_child_case_insensitive(_find_child_case_insensitive(_find_child_case_insensitive(root, "Gameface", True), "Content", True), "Paks", True)
+            try:
+                mods = _find_child_case_insensitive(paks, "~mods", True)
+            except ValueError:
+                mods = paks / "~mods"
+            destination = mods / DE_PAK_FILENAME
+        except Exception as exc:
+            messagebox.showerror("Invalid game folder", str(exc), parent=self.root)
+            self.de_status_vars[key].set("Installation stopped; choose the game root folder containing Gameface/Content/Paks.")
+            return
+        replacing = destination.exists()
+        consequence = "\n\nThe current mod file will be backed up before replacement." if replacing else "\n\nThe ~mods folder will be created if it does not exist."
+        if not messagebox.askyesno(
+            "Confirm Definitive Edition mod installation",
+            f"Install the Hololive Radio .pak into {config['display']}?\n\n"
+            f"{root}\n\nDestination: {relative.as_posix()}{consequence}\n\nContinue?",
+            parent=self.root,
+        ):
+            self.de_status_vars[key].set("Installation cancelled; no files were changed.")
+            return
+        button = self.de_install_buttons[key]
+        button.configure(state="disabled")
+        self.de_status_vars[key].set("Installing Hololive Radio .pak…")
+        self.root.update_idletasks()
+        try:
+            result = install_definitive_edition_pak(root, payload, config["display"])
+        except Exception as exc:
+            self.de_status_vars[key].set("Installation failed; any existing file was preserved or backed up.")
+            messagebox.showerror("Definitive Edition install failed", str(exc), parent=self.root)
+        else:
+            self.de_status_vars[key].set("Hololive Radio .pak installed successfully.")
+            messagebox.showinfo("Installation complete", result, parent=self.root)
+        finally:
+            button.configure(state="normal" if payload.is_file() and payload.stat().st_size > 0 else "disabled")
 
     def _choose_iso(self):
         path = filedialog.askopenfilename(
@@ -2949,7 +3340,7 @@ class App:
         if not iso_text or not out_text:
             messagebox.showwarning("Choose files", "Choose a PSP input ISO and output filename first.")
             return
-        payloads = {name: asset_path(name) for name in PSP_TARGET_PATHS}
+        payloads = {name: asset_path_in_game_folder(name, "VCS_PSP") for name in PSP_TARGET_PATHS}
         missing = [
             name for name, path in payloads.items()
             if not path.is_file() or path.stat().st_size <= 0
@@ -2963,10 +3354,7 @@ class App:
             return
         iso_path = Path(iso_text).expanduser()
         out_path = Path(out_text).expanduser()
-        if out_path.exists() and not messagebox.askyesno(
-            "Overwrite existing output?",
-            f"This output file already exists:\n\n{out_path}\n\nReplace it with the newly patched image? The input image will remain untouched.",
-        ):
+        if out_path.exists() and not messagebox.askyesno("Overwrite existing output?", f"The output file already exists:\n{out_path}\n\nReplace it with the new patched image? The old file will be restored if patching fails."):
             return
         try:
             for name, path in payloads.items():
@@ -3043,11 +3431,15 @@ class App:
     def _about_lcs_psp(self):
         messagebox.showinfo(
             "GTA Liberty City Stories PSP / Safety",
-            "The LCS PSP tab verifies PSP_GAME/PARAM.SFO against recognized GTA: Liberty City Stories (PSP) disc IDs, then automatically replaces all three bundled assets at these exact locations:\n\n"
+            "The LCS PSP tab verifies PSP_GAME/PARAM.SFO against recognized GTA: Liberty City Stories (PSP) disc IDs, then automatically replaces bundled assets at these exact locations:\n\n"
             "• PSP_GAME\\USRDIR\\AUDIO\\MUSIC\\KJAH.AT3\n"
             "• PSP_GAME\\USRDIR\\TEXT\\ENGLISH.GXT\n"
+            "• PSP_GAME\\USRDIR\\TEXT\\SPANISH.GXT\n"
+            "• PSP_GAME\\USRDIR\\TEXT\\FRENCH.GXT\n"
+            "• PSP_GAME\\USRDIR\\TEXT\\GERMAN.GXT\n"
+            "• PSP_GAME\\USRDIR\\TEXT\\ITALIAN.GXT\n"
             "• PSP_GAME\\USRDIR\\CHK\\PSPHR\\GAME.DTZ\n\n"
-            "These three replacement files are optional for building the EXE, but all three must be supplied in Assets\\LCS_PSP to enable patching. Any present files are embedded and applied automatically; the LCS tab does not show replacement-file pickers. "
+            "These seven replacement files are optional for building the EXE, but all seven must be supplied in Assets\\LCS_PSP to enable patching. Any present files are embedded and applied automatically; the LCS tab does not show replacement-file pickers. "
             "It creates a new ISO or CSO and never overwrites the input. Larger replacements are appended to new ISO sectors and the directory entries are updated. "
             "This ISO patch is experimental and has not been verified in-game. Test in PPSSPP first.",
         )
@@ -3065,16 +3457,13 @@ class App:
             messagebox.showerror(
                 "Required LCS PSP assets missing",
                 "This installer build is missing required file(s): " + ", ".join(missing) +
-                "\n\nPlace KJAH.AT3, ENGLISH.GXT, and GAME.DTZ in Assets\\LCS_PSP on the PC used to build the EXE, then rebuild.",
+                "\n\nPlace KJAH.AT3, ENGLISH.GXT, SPANISH.GXT, FRENCH.GXT, GERMAN.GXT, ITALIAN.GXT, and GAME.DTZ in Assets\\LCS_PSP on the PC used to build the EXE, then rebuild.",
             )
             return
 
         iso_path = Path(iso_text).expanduser()
         out_path = Path(out_text).expanduser()
-        if out_path.exists() and not messagebox.askyesno(
-            "Overwrite existing output?",
-            f"This output file already exists:\n\n{out_path}\n\nReplace it with the newly patched image? The input image will remain untouched.",
-        ):
+        if out_path.exists() and not messagebox.askyesno("Overwrite existing output?", f"The output file already exists:\n{out_path}\n\nReplace it with the new patched image? The old file will be restored if patching fails."):
             return
         if not messagebox.askyesno(
             "Confirm experimental LCS PSP patch",
@@ -3132,7 +3521,7 @@ class App:
     def _about(self):
         messagebox.showinfo(
             "About / Safety",
-            "The GTA VCS PS2 tab checks SYSTEM.CNF against known GTA: Vice City Stories (PS2) disc serials, then replaces five root-level language GXT files, AUDIO/MUSIC/VCPR.VB, and PS2/GAME.DTZ using local files in Assets/VCS_PS2 beside the application. These assets are not embedded in the EXE.\n\n"
+            "The GTA VCS PS2 tab checks SYSTEM.CNF against known GTA: Vice City Stories (PS2) disc serials, then replaces five root-level language GXT files, AUDIO/MUSIC/VCPR.VB, and PS2/GAME.DTZ using embedded files from Assets/VCS_PS2. Present payloads are bundled into the EXE.\n\n"
             "Classic GTA: Vice City (PS2) is not supported by this tab. The patch is experimental and has not been verified in-game. It creates a new ISO or CSO output and leaves the source image unchanged.\n\n"
             "Use only with a game image you are entitled to modify.",
         )
@@ -3222,23 +3611,20 @@ class App:
             return
         iso_path = Path(iso_text).expanduser()
         out_path = Path(out_text).expanduser()
-        payload_paths = {name: local_game_asset_path(name, "VCS_PS2") for name in VCS_PS2_TARGET_PATHS}
+        payload_paths = {name: asset_path_in_game_folder(name, "VCS_PS2") for name in VCS_PS2_TARGET_PATHS}
         missing = [name for name, path in payload_paths.items() if not path.is_file() or path.stat().st_size <= 0]
         if missing:
             messagebox.showwarning(
                 "Missing VCS PS2 assets",
-                "Put these local files in Assets\\VCS_PS2 beside the application, then restart it:\n\n" + "\n".join(missing),
+                "Add these files to Assets\\VCS_PS2 and rebuild the EXE:\n\n" + "\n".join(missing),
                 parent=self.root,
             )
             return
-        if out_path.exists() and not messagebox.askyesno(
-            "Overwrite existing output?",
-            f"This output file already exists:\n\n{out_path}\n\nReplace it with the newly patched image? The input image will remain untouched.",
-        ):
+        if out_path.exists() and not messagebox.askyesno("Overwrite existing output?", f"The output file already exists:\n{out_path}\n\nReplace it with the new patched image? The old file will be restored if patching fails."):
             return
         if not messagebox.askyesno(
             "Confirm experimental patch",
-            "Create a new patched GTA: Vice City Stories (PS2) ISO/CSO?\n\nThe ISO's SYSTEM.CNF must identify a supported VCS PS2 release. Classic GTA: Vice City (PS2) is not supported.\n\nSeven local files will be replaced using Assets/VCS_PS2. The original image will not be modified. This patch is experimental and has not been verified in-game.",
+            "Create a new patched GTA: Vice City Stories (PS2) ISO/CSO?\n\nThe ISO's SYSTEM.CNF must identify a supported VCS PS2 release. Classic GTA: Vice City (PS2) is not supported.\n\nSeven bundled files from Assets/VCS_PS2 will be used. The original image will not be modified. This patch is experimental and has not been verified in-game.",
         ):
             return
         self.patch_button.configure(state="disabled")
