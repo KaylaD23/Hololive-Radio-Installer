@@ -3,7 +3,9 @@
 
 The UI change branch brings many changes to the look of the ui see the UI Change section.
 
-There is a weird bug in some gta games where the audio isnt random when the audio file gets triggered it starts at the start of the file everytime and im yet to fix it as i dont actually know why it happens but i suspect its because ive replace the radio's with audio that is longer than the original i may have to go back and change the replaced radio stations to one that has the longest lenght and then make my audio shorter than the original or the same if possible that should fix it.
+There is a weird bug in some gta games where the audio isnt random when the audio file gets triggered it starts at the start of the file everytime and im yet to fix it as i dont actually know why it happens but i suspect its because ive replace the radio's with audio that is longer than the original i may have to go back and change the replaced radio stations to one that has the longest lenght and then make my audio shorter than the original or the same if possible that should fix it. 
+
+This project aims to fix the above issues i described https://github.com/KaylaD23/GTA-Radio-Patcher
 
 Original UI
 
